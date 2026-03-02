@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--state_path", default="")
     p.add_argument("--model", default="gemini-3.1-pro-preview")
     p.add_argument("--api_key_env", default="GEMINI_API_KEY")
+    p.add_argument("--env_file", default=".env")
     p.add_argument("--system_prompt_file", default="")
     p.add_argument("--temperature", type=float, default=0.4)
     p.add_argument("--top_p", type=float, default=0.95)
@@ -46,6 +47,27 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max_items", type=int, default=0)
     p.add_argument("--print_every", type=int, default=20)
     return p.parse_args()
+
+
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if (value.startswith("'") and value.endswith("'")) or (
+            value.startswith('"') and value.endswith('"')
+        ):
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
 
 
 def _load_state(path: Path) -> dict:
@@ -81,9 +103,12 @@ def _system_prompt(args: argparse.Namespace) -> str:
 def main() -> int:
     args = parse_args()
 
+    _load_env_file(Path(args.env_file))
     api_key = os.environ.get(args.api_key_env, "").strip()
     if not api_key:
-        raise RuntimeError(f"Missing API key in env var: {args.api_key_env}")
+        raise RuntimeError(
+            f"Missing API key in env var: {args.api_key_env} (checked env file: {args.env_file})"
+        )
 
     input_path = Path(args.input_jsonl)
     if not input_path.exists():

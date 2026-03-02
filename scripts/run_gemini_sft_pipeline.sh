@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-  echo "Usage: $0 <prompts_jsonl> <workdir> [model] [max_items]"
+  echo "Usage: $0 <prompts_jsonl|auto> <workdir> [model] [max_items]"
   exit 1
 fi
 
@@ -18,6 +18,14 @@ CLEAN="$WORKDIR/generated.clean.jsonl"
 TRAIN="$WORKDIR/train.jsonl"
 VAL="$WORKDIR/val.jsonl"
 TEST="$WORKDIR/test.jsonl"
+
+if [[ "$PROMPTS" == "auto" ]]; then
+  PROMPTS="$WORKDIR/prompts.seed.jsonl"
+  python scripts/build_prompt_seed.py \
+    --output_jsonl "$PROMPTS" \
+    --target 500 \
+    --overwrite
+fi
 
 python scripts/generate_sft_gemini.py \
   --input_jsonl "$PROMPTS" \
