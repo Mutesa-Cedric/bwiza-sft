@@ -82,6 +82,14 @@ python scripts/build_prompt_seed.py \
   --overwrite
 ```
 
+Or generate prompts with Gemini directly (recommended for quality):
+
+```bash
+python scripts/build_prompt_seed_gemini.py \
+  --output_jsonl outputs/sft/prompts.seed.gemini.jsonl \
+  --target 500
+```
+
 Then run a pilot batch:
 
 ```bash
@@ -95,6 +103,12 @@ Fully automatic shortcut (seed + generate + clean + split + preflight):
 
 ```bash
 scripts/run_gemini_sft_pipeline.sh auto outputs/sft gemini-3.1-pro-preview 100
+```
+
+Gemini-built prompts + full pipeline:
+
+```bash
+scripts/run_gemini_sft_pipeline.sh gemini outputs/sft gemini-3.1-pro-preview 100
 ```
 
 Pilot first (recommended):
