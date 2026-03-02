@@ -46,7 +46,10 @@ python scripts/eval_sft_gate.py \
 Generate SFT responses from prompt JSONL, then clean and split.
 
 ```bash
-export GEMINI_API_KEY='...'
+# Option A: .env (auto-loaded by script)
+cat > .env <<'EOF'
+GEMINI_API_KEY=your_key_here
+EOF
 
 python scripts/generate_sft_gemini.py \
   --input_jsonl /path/prompts.jsonl \
@@ -70,6 +73,30 @@ Or one command:
 scripts/run_gemini_sft_pipeline.sh /path/prompts.jsonl outputs/sft gemini-3.1-pro-preview
 ```
 
+If you don't already have a prompts file, build one quickly:
+
+```bash
+python scripts/build_prompt_seed.py \
+  --output_jsonl outputs/sft/prompts.seed.jsonl \
+  --target 500 \
+  --overwrite
+```
+
+Then run a pilot batch:
+
+```bash
+python scripts/generate_sft_gemini.py \
+  --input_jsonl outputs/sft/prompts.seed.jsonl \
+  --output_jsonl outputs/sft/pilot.raw.jsonl \
+  --max_items 100
+```
+
+Fully automatic shortcut (seed + generate + clean + split + preflight):
+
+```bash
+scripts/run_gemini_sft_pipeline.sh auto outputs/sft gemini-3.1-pro-preview 100
+```
+
 Pilot first (recommended):
 
 ```bash
@@ -77,5 +104,28 @@ python scripts/generate_sft_gemini.py \
   --input_jsonl /path/prompts.jsonl \
   --output_jsonl outputs/sft/pilot.raw.jsonl \
   --model gemini-3.1-pro-preview \
+  --max_items 100
+```
+
+TLS/SSL troubleshooting (macOS):
+
+```bash
+source .venv/bin/activate
+pip install -U certifi
+```
+
+Optional custom CA bundle:
+
+```bash
+export GEMINI_CA_BUNDLE=/path/to/ca-bundle.pem
+```
+
+If your env file is not `.env`, pass it explicitly:
+
+```bash
+python scripts/generate_sft_gemini.py \
+  --env_file /path/to/custom.env \
+  --input_jsonl /path/prompts.jsonl \
+  --output_jsonl outputs/sft/pilot.raw.jsonl \
   --max_items 100
 ```

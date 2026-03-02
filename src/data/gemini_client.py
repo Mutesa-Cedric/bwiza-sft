@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 import json
+import os
+import ssl
 import time
 from urllib import error, request
 
@@ -23,6 +25,21 @@ class GeminiConfig:
 
 class GeminiError(RuntimeError):
     pass
+
+
+def _ssl_context() -> ssl.SSLContext:
+    # Allow explicit override when users provide a custom enterprise/OS bundle.
+    ca_bundle = os.environ.get("GEMINI_CA_BUNDLE", "").strip()
+    if ca_bundle:
+        return ssl.create_default_context(cafile=ca_bundle)
+
+    # Prefer certifi bundle to avoid local trust-store issues on some Python builds.
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
 
 
 def _extract_text(payload: dict[str, Any]) -> str:
@@ -67,9 +84,10 @@ def generate_text(cfg: GeminiConfig, user_prompt: str, system_prompt: str = "") 
     )
 
     last_err = ""
+    ctx = _ssl_context()
     for attempt in range(1, cfg.max_retries + 1):
         try:
-            with request.urlopen(req, timeout=120) as resp:
+            with request.urlopen(req, timeout=120, context=ctx) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
                 text = _extract_text(payload)
                 if not text:
