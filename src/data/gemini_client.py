@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+import http.client
 import json
 import os
 import ssl
@@ -100,7 +101,16 @@ def generate_text(cfg: GeminiConfig, user_prompt: str, system_prompt: str = "") 
                 time.sleep(cfg.retry_backoff_sec * attempt)
                 continue
             raise GeminiError(last_err) from e
-        except (error.URLError, TimeoutError, json.JSONDecodeError, GeminiError) as e:
+        except (
+            error.URLError,
+            TimeoutError,
+            json.JSONDecodeError,
+            GeminiError,
+            http.client.RemoteDisconnected,
+            http.client.ResponseNotReady,
+            ConnectionResetError,
+            ssl.SSLError,
+        ) as e:
             last_err = str(e)
             if attempt < cfg.max_retries:
                 time.sleep(cfg.retry_backoff_sec * attempt)
