@@ -40,3 +40,42 @@ python scripts/eval_sft_gate.py \
   --max_english_drift_delta 0.0 \
   --min_rw_marker_density_delta 0.0
 ```
+
+## Gemini Distillation Data Pipeline
+
+Generate SFT responses from prompt JSONL, then clean and split.
+
+```bash
+export GEMINI_API_KEY='...'
+
+python scripts/generate_sft_gemini.py \
+  --input_jsonl /path/prompts.jsonl \
+  --output_jsonl outputs/sft/generated.raw.jsonl \
+  --model gemini-3.1-pro-preview
+
+python scripts/clean_sft_generated.py \
+  --input_jsonl outputs/sft/generated.raw.jsonl \
+  --output_jsonl outputs/sft/generated.clean.jsonl
+
+python scripts/split_sft_dataset.py \
+  --input_jsonl outputs/sft/generated.clean.jsonl \
+  --train_jsonl outputs/sft/train.jsonl \
+  --val_jsonl outputs/sft/val.jsonl \
+  --test_jsonl outputs/sft/test.jsonl
+```
+
+Or one command:
+
+```bash
+scripts/run_gemini_sft_pipeline.sh /path/prompts.jsonl outputs/sft gemini-3.1-pro-preview
+```
+
+Pilot first (recommended):
+
+```bash
+python scripts/generate_sft_gemini.py \
+  --input_jsonl /path/prompts.jsonl \
+  --output_jsonl outputs/sft/pilot.raw.jsonl \
+  --model gemini-3.1-pro-preview \
+  --max_items 100
+```
