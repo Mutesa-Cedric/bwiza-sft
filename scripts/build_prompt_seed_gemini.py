@@ -56,6 +56,13 @@ ALLOWED_LANG_MODES = {
     "control",
 }
 
+TASK_LANG_MODE_COMPAT: dict[str, set[str]] = {
+    "rw_instruction": {"rw"},
+    "code_switch_instruction": {"rw_mixed"},
+    "multilingual_retention": {"en", "fr", "sw"},
+    "language_control": {"control"},
+}
+
 DEFAULT_SYSTEM_PROMPT = (
     "You are a senior native Kinyarwanda linguist and LLM data curator. "
     "Generate high-quality user prompts for supervised fine-tuning. "
@@ -222,6 +229,9 @@ def _validate_item(item: dict) -> tuple[bool, str]:
         return False, "invalid_task_type"
     if lang_mode not in ALLOWED_LANG_MODES:
         return False, "invalid_lang_mode"
+    allowed = TASK_LANG_MODE_COMPAT.get(task_type, set())
+    if lang_mode not in allowed:
+        return False, "task_lang_mode_mismatch"
     return True, "ok"
 
 
