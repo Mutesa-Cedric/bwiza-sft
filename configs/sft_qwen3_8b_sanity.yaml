@@ -1,0 +1,35 @@
+run:
+  name: qwen3-8b-rw-v1-sft-sanity
+  seed: 42
+
+model:
+  name: Qwen/Qwen3-8B
+  trust_remote_code: true
+
+format:
+  user_prefix: "User: "
+  assistant_prefix: "Assistant: "
+
+training:
+  seq_len: 2048
+  learning_rate: 1.0e-5
+  warmup_ratio: 0.02
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  bf16: true
+  gradient_checkpointing: true
+  optimizer: adafactor
+  train_batch_size: 1
+  gradient_accumulation_steps: 8
+  epochs: 1
+  max_steps: 200
+  eval_every_steps: 100
+  eval_batches: 8
+  eval_batch_size: 2
+  save_every_steps: 100
+
+wandb:
+  enabled: true
+  project: bwiza-sft
+  run_group: qwen3-8b-rw-v1
+  mode: online
