@@ -56,3 +56,22 @@ def test_extract_json_block_repairs_trailing_comma() -> None:
     payload = mod._extract_json_block(text)
     assert isinstance(payload, dict)
     assert isinstance(payload.get("items"), list)
+
+
+def test_choose_batch_size_candidate_pool_for_single() -> None:
+    mod = _load_module()
+    assert mod._choose_batch_size(1, 3) == 3
+    assert mod._choose_batch_size(1, 1) == 1
+    assert mod._choose_batch_size(4, 3) == 4
+
+
+def test_build_user_prompt_includes_soft_memory() -> None:
+    mod = _load_module()
+    p = mod._build_user_prompt(
+        topic="uburezi mu Rwanda",
+        n=1,
+        avoid_prompts=["Sobanura uburezi mu Rwanda."],
+        frequent_patterns=["Sobanura uburyo bwo..."],
+    )
+    assert "Avoid prompts that are same/very similar" in p
+    assert "Avoid overusing these common prompt openings" in p
