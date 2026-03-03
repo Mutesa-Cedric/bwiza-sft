@@ -36,3 +36,23 @@ def test_task_lang_mode_valid_accepts() -> None:
     )
     assert ok
     assert reason == "ok"
+
+
+def test_extract_json_block_handles_code_fence() -> None:
+    mod = _load_module()
+    text = """```json
+{"items":[{"prompt":"Muraho","task_type":"rw_instruction","lang_mode":"rw"}]}
+```"""
+    payload = mod._extract_json_block(text)
+    assert isinstance(payload, dict)
+    assert "items" in payload
+
+
+def test_extract_json_block_repairs_trailing_comma() -> None:
+    mod = _load_module()
+    text = (
+        '{"items":[{"prompt":"Muraho","task_type":"rw_instruction","lang_mode":"rw",}],}'
+    )
+    payload = mod._extract_json_block(text)
+    assert isinstance(payload, dict)
+    assert isinstance(payload.get("items"), list)

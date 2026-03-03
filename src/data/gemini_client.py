@@ -22,6 +22,8 @@ class GeminiConfig:
     max_output_tokens: int = 1024
     max_retries: int = 5
     retry_backoff_sec: float = 1.5
+    response_mime_type: str = ""
+    response_schema: dict[str, Any] | None = None
 
 
 class GeminiError(RuntimeError):
@@ -73,6 +75,10 @@ def generate_text(cfg: GeminiConfig, user_prompt: str, system_prompt: str = "") 
             "maxOutputTokens": cfg.max_output_tokens,
         },
     }
+    if cfg.response_mime_type:
+        body["generationConfig"]["responseMimeType"] = cfg.response_mime_type
+    if cfg.response_schema is not None:
+        body["generationConfig"]["responseSchema"] = cfg.response_schema
     if system_prompt.strip():
         body["systemInstruction"] = {"parts": [{"text": system_prompt.strip()}]}
 

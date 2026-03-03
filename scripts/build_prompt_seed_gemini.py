@@ -7,6 +7,7 @@ import argparse
 from datetime import datetime, timezone
 from hashlib import sha1
 import json
+import re
 from pathlib import Path
 import os
 import sys
@@ -72,6 +73,36 @@ DEFAULT_SYSTEM_PROMPT = (
     "Keep prompts realistic and diverse. "
     "Output STRICT JSON only."
 )
+
+PROMPT_SEED_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string"},
+                    "task_type": {
+                        "type": "string",
+                        "enum": [
+                            "rw_instruction",
+                            "code_switch_instruction",
+                            "multilingual_retention",
+                            "language_control",
+                        ],
+                    },
+                    "lang_mode": {
+                        "type": "string",
+                        "enum": ["rw", "rw_mixed", "en", "fr", "sw", "control"],
+                    },
+                },
+                "required": ["prompt", "task_type", "lang_mode"],
+            },
+        }
+    },
+    "required": ["items"],
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -186,14 +217,42 @@ def _prompt_id(prompt: str) -> str:
 def _extract_json_block(text: str) -> dict:
     s = text.strip()
     if s.startswith("```"):
-        s = s.strip("`")
+        lines = s.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        s = "\n".join(lines).strip()
         if s.startswith("json"):
             s = s[4:].strip()
+
+    # Fast path: already valid JSON.
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback: extract largest JSON object span.
     start = s.find("{")
     end = s.rfind("}")
     if start < 0 or end < 0 or end <= start:
         raise ValueError("no_json_object_found")
-    return json.loads(s[start : end + 1])
+    block = s[start : end + 1]
+
+    try:
+        obj = json.loads(block)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        # Common LLM glitch: trailing commas before closing braces/brackets.
+        repaired = re.sub(r",(\s*[}\]])", r"\1", block)
+        obj = json.loads(repaired)
+        if isinstance(obj, dict):
+            return obj
+
+    raise ValueError("json_object_not_dict")
 
 
 def _build_user_prompt(topic: str, n: int) -> str:
@@ -260,6 +319,8 @@ def main() -> int:
         max_output_tokens=int(args.max_output_tokens),
         max_retries=int(args.max_retries),
         retry_backoff_sec=float(args.retry_backoff_sec),
+        response_mime_type="application/json",
+        response_schema=PROMPT_SEED_RESPONSE_SCHEMA,
     )
 
     state = _load_state(state_path)
@@ -271,7 +332,10 @@ def main() -> int:
 
         try:
             text = generate_text(cfg, user_prompt=user_prompt, system_prompt=DEFAULT_SYSTEM_PROMPT)
-            payload = _extract_json_block(text)
+            try:
+                payload = _extract_json_block(text)
+            except (ValueError, json.JSONDecodeError) as parse_err:
+                raise ValueError(f"invalid_json_output:{parse_err}; head={text[:320]!r}") from parse_err
             items = payload.get("items") if isinstance(payload, dict) else None
             if not isinstance(items, list):
                 raise ValueError("items_not_list")
