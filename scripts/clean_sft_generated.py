@@ -25,6 +25,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min_prompt_chars", type=int, default=6)
     p.add_argument("--min_response_chars", type=int, default=24)
     p.add_argument("--max_response_chars", type=int, default=6000)
+    p.add_argument("--max_consecutive_repeat_words", type=int, default=12)
+    p.add_argument("--min_unique_word_ratio", type=float, default=0.12)
+    p.add_argument("--max_english_ratio_for_rw", type=float, default=0.45)
+    p.add_argument("--allow_role_prefix_leakage", action="store_true", default=False)
     return p.parse_args()
 
 
@@ -43,6 +47,10 @@ def main() -> int:
         min_prompt_chars=int(args.min_prompt_chars),
         min_response_chars=int(args.min_response_chars),
         max_response_chars=int(args.max_response_chars),
+        max_consecutive_repeat_words=int(args.max_consecutive_repeat_words),
+        min_unique_word_ratio=float(args.min_unique_word_ratio),
+        max_english_ratio_for_rw=float(args.max_english_ratio_for_rw),
+        reject_role_prefix_leakage=not bool(args.allow_role_prefix_leakage),
     )
 
     seen: set[str] = set()
@@ -63,7 +71,7 @@ def main() -> int:
 
         prompt = extract_prompt(raw)
         response = extract_response(raw)
-        d = clean_decision(prompt, response, cfg)
+        d = clean_decision(prompt, response, cfg, raw=raw)
 
         if not d.keep:
             stats["rejected"] += 1

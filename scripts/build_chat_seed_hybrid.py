@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hybrid prompt seed pipeline: Gemini Flash generation + OpenAI organizer normalization."""
+"""Hybrid chat-data pipeline: Gemini Flash dialogue generation + OpenAI organizer normalization."""
 
 from __future__ import annotations
 
@@ -39,112 +39,48 @@ DEFAULT_TOPICS = [
     "imihindagurikire y'ibihe",
     "ubucuruzi buto",
     "imiyoborere myiza",
-    "ubukerarugendo",
-    "kubungabunga umuco",
-    "serivisi za leta",
-    "uburenganzira bw'abaturage",
 ]
-
-ALLOWED_TASK_TYPES = {
-    "rw_instruction",
-    "code_switch_instruction",
-    "multilingual_retention",
-    "language_control",
-    "followup_clarification",
-    "safety_refusal",
-    "transformation",
-    "structured_output",
-    "noisy_input_robustness",
-    "open_domain_chat",
-}
-
-ALLOWED_LANG_MODES = {
-    "rw",
-    "rw_mixed",
-    "en",
-    "fr",
-    "sw",
-    "control",
-}
-
-TASK_LANG_MODE_COMPAT: dict[str, set[str]] = {
-    "rw_instruction": {"rw"},
-    "code_switch_instruction": {"rw_mixed"},
-    "multilingual_retention": {"en", "fr", "sw"},
-    "language_control": {"control"},
-    "followup_clarification": {"rw", "rw_mixed"},
-    "safety_refusal": {"rw", "rw_mixed", "control"},
-    "transformation": {"rw", "rw_mixed", "en", "fr", "sw"},
-    "structured_output": {"rw", "rw_mixed", "en", "fr", "sw"},
-    "noisy_input_robustness": {"rw", "rw_mixed"},
-    "open_domain_chat": {"rw", "rw_mixed", "en", "fr", "sw"},
-}
-
-TASK_TYPE_CYCLE = [
-    "rw_instruction",
-    "followup_clarification",
-    "transformation",
-    "safety_refusal",
-    "noisy_input_robustness",
-    "code_switch_instruction",
-    "multilingual_retention",
-    "structured_output",
-    "language_control",
-    "open_domain_chat",
-]
-
-TASK_TYPE_ENUM = "|".join(sorted(ALLOWED_TASK_TYPES))
 
 FLASH_SYSTEM_PROMPT = (
-    "Generate one realistic user prompt for SFT data. "
-    "Output ONLY one minified JSON object with keys: prompt, task_type, lang_mode. "
-    "No markdown. No code fences. No extra text."
+    "Generate natural, realistic chat conversations for assistant fine-tuning. "
+    "Return STRICT JSON only with no markdown or code fences."
 )
 
 ORGANIZER_SYSTEM_PROMPT = (
-    "You normalize prompt-seed outputs into valid JSON. "
-    "Return ONLY one minified JSON object and nothing else. "
+    "You repair malformed conversation JSON into valid JSON. "
+    "Return only minified JSON. "
     "If unusable, return: {\"reject_reason\":\"<short_reason>\"}."
 )
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Hybrid prompt seed pipeline (Flash + organizer)")
-    p.add_argument("--output_prefix", default="outputs/sft/prompts.seed.hybrid")
+    p = argparse.ArgumentParser(description="Hybrid chat seed pipeline (Flash + organizer)")
+    p.add_argument("--output_prefix", default="outputs/sft/chat.seed.hybrid")
     p.add_argument("--topics_file", default="")
-    p.add_argument("--target", type=int, default=30000)
-    p.add_argument("--flash_batch_size", type=int, default=4)
+    p.add_argument("--target_dialogues", type=int, default=5000)
     p.add_argument("--gemini_model", default="gemini-3-flash-preview")
     p.add_argument("--organizer_model", default="gpt-5.2")
     p.add_argument("--env_file", default=".env")
     p.add_argument("--gemini_api_key_env", default="GEMINI_API_KEY")
     p.add_argument("--openai_api_key_env", default="OPENAI_API_KEY")
-    p.add_argument("--dedup_db", default="outputs/sft/prompts.seed.shared.dedup.sqlite")
+    p.add_argument("--dedup_db", default="outputs/sft/chat.seed.shared.dedup.sqlite")
+    p.add_argument("--min_turns", type=int, default=3, help="Minimum user-assistant pairs.")
+    p.add_argument("--max_turns", type=int, default=6, help="Maximum user-assistant pairs.")
+    p.add_argument("--history_window_messages", type=int, default=8)
     p.add_argument("--sleep_sec", type=float, default=0.2)
     p.add_argument("--print_every", type=int, default=10)
-    p.add_argument(
-        "--max_output_tokens",
-        type=int,
-        default=0,
-        help="Gemini max output tokens. Set 0 to omit explicit cap.",
-    )
+    p.add_argument("--max_output_tokens", type=int, default=0, help="Gemini max output tokens; 0 disables cap.")
     p.add_argument("--max_retries", type=int, default=5)
     p.add_argument("--retry_backoff_sec", type=float, default=1.5)
     p.add_argument("--near_dup_threshold", type=float, default=0.9)
     p.add_argument("--near_dup_topic_limit", type=int, default=200)
     p.add_argument("--near_dup_global_limit", type=int, default=400)
-    p.add_argument("--avoid_topic_recent", type=int, default=12)
-    p.add_argument("--avoid_global_recent", type=int, default=12)
-    p.add_argument("--avoid_pattern_topk", type=int, default=8)
+    p.add_argument("--avoid_topic_recent", type=int, default=10)
+    p.add_argument("--avoid_global_recent", type=int, default=10)
+    p.add_argument("--avoid_pattern_topk", type=int, default=6)
     p.add_argument("--cb_consecutive_429", type=int, default=12)
     p.add_argument("--cb_consecutive_parse", type=int, default=12)
     p.add_argument("--cb_consecutive_fail", type=int, default=30)
-    p.add_argument(
-        "--task_type_targeting",
-        choices=["none", "soft", "strict"],
-        default="soft",
-        help="none: no targeting; soft: request type but accept all valid; strict: enforce requested type.",
-    )
     return p.parse_args()
 
 
@@ -185,10 +121,6 @@ def _load_topics(path: str) -> list[str]:
     return topics
 
 
-def _prompt_id(prompt: str) -> str:
-    return sha1(prompt.encode("utf-8")).hexdigest()[:16]
-
-
 def _extract_json_block(text: str) -> dict[str, Any]:
     s = text.strip()
     if s.startswith("```"):
@@ -211,153 +143,102 @@ def _extract_json_block(text: str) -> dict[str, Any]:
     start = s.find("{")
     end = s.rfind("}")
     if start < 0 or end < 0 or end <= start:
-        partial = _extract_partial_item(s)
-        if partial is not None:
-            return partial
         raise ValueError("no_json_object_found")
     block = s[start : end + 1]
     repaired = re.sub(r",(\s*[}\]])", r"\1", block)
-    try:
-        obj = json.loads(repaired)
-        if isinstance(obj, dict):
-            return obj
-    except json.JSONDecodeError:
-        pass
-
-    partial = _extract_partial_item(s)
-    if partial is not None:
-        return partial
-    raise ValueError("json_object_not_dict")
+    obj = json.loads(repaired)
+    if not isinstance(obj, dict):
+        raise ValueError("json_object_not_dict")
+    return obj
 
 
-def _decode_json_string_fragment(raw: str) -> str:
-    try:
-        return normalize_text(json.loads(f"\"{raw}\""))
-    except Exception:
-        return normalize_text(raw.replace("\\n", " ").replace('\\"', '"'))
+def _extract_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
+    raw = payload.get("messages")
+    if not isinstance(raw, list):
+        raw = payload.get("conversation")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    for x in raw:
+        if not isinstance(x, dict):
+            continue
+        role = normalize_text(x.get("role", "")).lower()
+        content = normalize_text(x.get("content", ""))
+        if role not in {"user", "assistant"} or not content:
+            continue
+        out.append({"role": role, "content": content})
+    return out
 
 
-def _extract_partial_item(text: str) -> dict[str, str] | None:
-    prompt_m = re.search(r'"prompt"\s*:\s*"((?:\\.|[^"\\])*)"', text)
-    task_m = re.search(
-        rf'"task_type"\s*:\s*"({TASK_TYPE_ENUM})"',
-        text,
-    )
-    lang_m = re.search(r'"lang_mode"\s*:\s*"(rw|rw_mixed|en|fr|sw|control)"', text)
-    if not (prompt_m and task_m and lang_m):
-        return None
-    prompt = _decode_json_string_fragment(prompt_m.group(1))
-    if not prompt:
-        return None
-    return {"prompt": prompt, "task_type": task_m.group(1), "lang_mode": lang_m.group(1)}
-
-
-def _validate_item(item: dict[str, Any]) -> tuple[bool, str]:
-    prompt = normalize_text(item.get("prompt", ""))
-    task_type = normalize_text(item.get("task_type", ""))
-    lang_mode = normalize_text(item.get("lang_mode", ""))
-    if not prompt:
-        return False, "empty_prompt"
-    if len(prompt) < 10:
-        return False, "prompt_too_short"
-    if len(prompt) > 260:
-        return False, "prompt_too_long"
-    if task_type not in ALLOWED_TASK_TYPES:
-        return False, "invalid_task_type"
-    if lang_mode not in ALLOWED_LANG_MODES:
-        return False, "invalid_lang_mode"
-    allowed = TASK_LANG_MODE_COMPAT.get(task_type, set())
-    if lang_mode not in allowed:
-        return False, "task_lang_mode_mismatch"
+def _validate_messages(messages: list[dict[str, str]], *, min_turns: int, max_turns: int) -> tuple[bool, str]:
+    if not messages:
+        return False, "empty_messages"
+    if messages[0]["role"] != "user":
+        return False, "must_start_user"
+    if messages[-1]["role"] != "assistant":
+        return False, "must_end_assistant"
+    if len(messages) % 2 != 0:
+        return False, "messages_not_even"
+    turns = len(messages) // 2
+    if turns < min_turns:
+        return False, "too_few_turns"
+    if turns > max_turns:
+        return False, "too_many_turns"
+    prev = None
+    for m in messages:
+        if prev == m["role"]:
+            return False, "roles_not_alternating"
+        if len(m["content"]) < 2:
+            return False, "content_too_short"
+        prev = m["role"]
     return True, "ok"
 
 
-def _build_flash_user_prompt(
-    topic: str,
-    n: int,
-    *,
-    required_task_type: str,
-    targeting_mode: str,
-    avoid_prompts: list[str],
-    frequent_patterns: list[str],
-) -> str:
-    avoid_block = ""
-    if avoid_prompts:
-        avoid_block += "Avoid same/very similar prompts as:\n"
-        avoid_block += "\n".join([f"- {p}" for p in avoid_prompts]) + "\n"
-    if frequent_patterns:
-        avoid_block += "Avoid these common openings:\n"
-        avoid_block += "\n".join([f"- {p}" for p in frequent_patterns]) + "\n"
-    return (
-        "Create prompt-seed items for supervised fine-tuning.\n"
-        f"Topic: {topic}\n"
-        f"Need exactly {n} items.\n"
-        "Return one JSON object exactly in this schema:\n"
-        "{\"items\":[{\"prompt\":\"<string>\",\"task_type\":\""
-        + TASK_TYPE_ENUM
-        + "\","
-        "\"lang_mode\":\"rw|rw_mixed|en|fr|sw|control\"}]}\n"
-        "Rules:\n"
-        "- prompt must be realistic and <= 220 chars\n"
-        "- no answer text, prompt only\n"
-        + (
-            f"- preferred task_type is {required_task_type}\n"
-            if targeting_mode in {"soft", "strict"}
-            else ""
-        )
-        + avoid_block
-        + "- output JSON only"
-    )
+def _conversation_signature(messages: list[dict[str, str]]) -> str:
+    # Use first user turns plus first assistant answer to reduce false duplicate hits on common openings.
+    users = [m["content"] for m in messages if m["role"] == "user"]
+    assistants = [m["content"] for m in messages if m["role"] == "assistant"]
+    parts: list[str] = []
+    parts.extend(users[:2])
+    if assistants:
+        parts.append(assistants[0])
+    sig = " || ".join(parts)
+    return normalize_text(sig)
 
 
-def _build_organizer_user_prompt(
-    *,
-    topic: str,
-    raw_text: str,
-    failure_reason: str,
-    n: int,
-    required_task_type: str,
-    targeting_mode: str,
-    avoid_prompts: list[str],
-    frequent_patterns: list[str],
-) -> str:
-    avoid_block = ""
-    if avoid_prompts:
-        avoid_block += "Do not return prompts same/very similar to:\n"
-        avoid_block += "\n".join([f"- {p}" for p in avoid_prompts]) + "\n"
-    if frequent_patterns:
-        avoid_block += "Avoid these common openings:\n"
-        avoid_block += "\n".join([f"- {p}" for p in frequent_patterns]) + "\n"
-    return (
-        "Normalize the raw model output into valid prompt-seed JSON.\n"
-        f"Topic: {topic}\n"
-        f"Target item count: up to {n}\n"
-        f"Local parse failure: {failure_reason}\n"
-        "Return exactly one minified JSON object in one of these forms:\n"
-        "{\"items\":[{\"prompt\":\"<string>\",\"task_type\":\""
-        + TASK_TYPE_ENUM
-        + "\","
-        "\"lang_mode\":\"rw|rw_mixed|en|fr|sw|control\"}]}\n"
-        "OR\n"
-        "{\"reject_reason\":\"<short_reason>\"}\n"
-        + (
-            f"- preferred task_type is {required_task_type}\n"
-            if targeting_mode in {"soft", "strict"}
-            else ""
-        )
-        + avoid_block
-        + "Raw output follows:\n"
-        f"{raw_text}"
-    )
+def _conversation_id(messages: list[dict[str, str]]) -> str:
+    raw = " | ".join([f"{m['role']}:{m['content']}" for m in messages])
+    return f"ch_{sha1(raw.encode('utf-8')).hexdigest()[:16]}"
 
 
-def _payload_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    items = payload.get("items")
-    if isinstance(items, list):
-        return [x for x in items if isinstance(x, dict)]
-    if {"prompt", "task_type", "lang_mode"}.issubset(set(payload.keys())):
-        return [payload]
-    return []
+def _infer_lang_mode(text: str) -> str:
+    words = re.findall(r"[A-Za-z']+", text.lower())
+    if not words:
+        return "rw"
+    en = {
+        "the",
+        "and",
+        "is",
+        "are",
+        "to",
+        "for",
+        "with",
+        "how",
+        "what",
+        "when",
+        "where",
+    }
+    en_ratio = sum(1 for w in words if w in en) / len(words)
+    return "rw_mixed" if en_ratio >= 0.12 else "rw"
+
+
+def _history_to_prompt(messages: list[dict[str, str]], *, window: int) -> str:
+    clipped = messages[-window:] if window > 0 else messages
+    lines = []
+    for m in clipped:
+        role = "User" if m["role"] == "user" else "Assistant"
+        lines.append(f"{role}: {m['content']}")
+    return "\n".join(lines)
 
 
 def _collect_avoid_memory(
@@ -383,18 +264,82 @@ def _collect_avoid_memory(
 
 
 def _out_path(prefix: Path, suffix: str) -> Path:
-    # Preserve literal prefix (e.g. prompts.seed.hybrid) instead of stripping extension.
+    # Treat prefix as literal prefix; do not strip ".hybrid" with Path.with_suffix().
     return Path(f"{prefix}.{suffix}")
+
+
+def _build_flash_user_prompt(
+    topic: str,
+    *,
+    min_turns: int,
+    max_turns: int,
+    avoid_prompts: list[str],
+    frequent_patterns: list[str],
+) -> str:
+    avoid_block = ""
+    if avoid_prompts:
+        avoid_block += "Avoid conversations very similar to these starters:\n"
+        avoid_block += "\n".join([f"- {p}" for p in avoid_prompts]) + "\n"
+    if frequent_patterns:
+        avoid_block += "Avoid overusing these openings:\n"
+        avoid_block += "\n".join([f"- {p}" for p in frequent_patterns]) + "\n"
+    return (
+        "Generate one realistic day-to-day chat conversation.\n"
+        f"Topic: {topic}\n"
+        "Output one minified JSON object with exact schema:\n"
+        "{\"messages\":[{\"role\":\"user|assistant\",\"content\":\"<text>\"}]}\n"
+        "Rules:\n"
+        f"- total turns between {min_turns} and {max_turns} user-assistant pairs\n"
+        "- messages must alternate user/assistant and start with user\n"
+        "- natural style, include occasional short and informal user messages\n"
+        "- allow natural code-switching in some user messages\n"
+        + avoid_block
+        + "- output JSON only"
+    )
+
+
+def _build_organizer_user_prompt(
+    *,
+    topic: str,
+    raw_text: str,
+    failure_reason: str,
+    min_turns: int,
+    max_turns: int,
+    avoid_prompts: list[str],
+    frequent_patterns: list[str],
+) -> str:
+    avoid_block = ""
+    if avoid_prompts:
+        avoid_block += "Do not produce chats with starters similar to:\n"
+        avoid_block += "\n".join([f"- {p}" for p in avoid_prompts]) + "\n"
+    if frequent_patterns:
+        avoid_block += "Avoid these common openings:\n"
+        avoid_block += "\n".join([f"- {p}" for p in frequent_patterns]) + "\n"
+    return (
+        "Repair/normalize the raw output into valid conversation JSON.\n"
+        f"Topic: {topic}\n"
+        f"Validation failure: {failure_reason}\n"
+        "Return exactly one minified JSON object in one of these forms:\n"
+        "{\"messages\":[{\"role\":\"user|assistant\",\"content\":\"<text>\"}]}\n"
+        "OR\n"
+        "{\"reject_reason\":\"<short_reason>\"}\n"
+        f"- conversation must contain {min_turns} to {max_turns} user-assistant pairs\n"
+        "- must start user, end assistant, alternating roles\n"
+        + avoid_block
+        + "Raw output follows:\n"
+        f"{raw_text}"
+    )
 
 
 def _classify_failure(err: str) -> tuple[bool, bool]:
     e = normalize_text(err).lower()
     is_429 = "http_429" in e
     is_parse = (
-        "invalid_json_output" in e
-        or "no_json_object_found" in e
+        "invalid_json" in e
         or "json_object_not_dict" in e
-        or "invalid_payload_not_object" in e
+        or "no_json_object_found" in e
+        or "messages_not_even" in e
+        or "roles_not_alternating" in e
     )
     return is_429, is_parse
 
@@ -431,6 +376,7 @@ def _load_state(path: Path) -> dict[str, Any]:
         "accepted_organized": 0,
         "rejected": 0,
         "failed_calls": 0,
+        "pairs_written": 0,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "updated_at": "",
     }
@@ -444,66 +390,83 @@ def _save_state(path: Path, state: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def _accept_record(
+def _accept_dialogue(
     *,
-    item: dict[str, Any],
+    messages: list[dict[str, str]],
     topic: str,
     source: str,
     model_name: str,
     dedup: PromptDedupIndex,
-    dedup_threshold: float,
-    dedup_topic_limit: int,
-    dedup_global_limit: int,
-    required_task_type: str,
-    targeting_mode: str,
-    final_path: Path,
-    local_path: Path,
-    organized_path: Path,
-) -> tuple[bool, str]:
-    ok, reason = _validate_item(item)
-    if not ok:
-        return False, reason
-    if targeting_mode == "strict" and normalize_text(item["task_type"]) != required_task_type:
-        return False, "task_type_not_requested"
-    prompt = normalize_text(item["prompt"])
+    near_dup_threshold: float,
+    near_dup_topic_limit: int,
+    near_dup_global_limit: int,
+    dialogues_path: Path,
+    pairs_path: Path,
+    history_window_messages: int,
+) -> tuple[bool, str, int]:
+    sig = _conversation_signature(messages)
+    if not sig:
+        return False, "empty_signature", 0
     near_dup, near_match = dedup.has_near_duplicate(
-        prompt=prompt,
+        prompt=sig,
         topic=topic,
-        threshold=dedup_threshold,
-        topic_limit=dedup_topic_limit,
-        global_limit=dedup_global_limit,
+        threshold=near_dup_threshold,
+        topic_limit=near_dup_topic_limit,
+        global_limit=near_dup_global_limit,
     )
     if near_dup:
-        return False, f"near_duplicate:{near_match}"
+        return False, f"near_duplicate:{near_match}", 0
 
-    key = prompt.lower()
+    key = sig.lower()
     inserted = dedup.add_if_new(
         prompt_key=key,
-        first_prompt=prompt,
+        first_prompt=sig,
         first_source=source,
         topic=topic,
         created_at=datetime.now(timezone.utc).isoformat(),
     )
     if not inserted:
-        return False, "duplicate_prompt"
+        return False, "duplicate_signature", 0
 
-    rec = {
-        "id": f"hy_{_prompt_id(prompt)}",
-        "prompt": prompt,
-        "task_type": normalize_text(item["task_type"]),
-        "content_type": normalize_text(item["task_type"]),
-        "lang_mode": normalize_text(item["lang_mode"]),
+    conv_id = _conversation_id(messages)
+    dialogue_rec = {
+        "id": conv_id,
         "topic": topic,
+        "messages": messages,
         "source": source,
         "teacher_model": model_name,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    append_jsonl(final_path, rec)
-    if source == "flash_local":
-        append_jsonl(local_path, rec)
-    else:
-        append_jsonl(organized_path, rec)
-    return True, "ok"
+    append_jsonl(dialogues_path, dialogue_rec)
+
+    pairs_written = 0
+    history: list[dict[str, str]] = []
+    turn = 0
+    for m in messages:
+        if m["role"] == "user":
+            history.append(m)
+            continue
+        turn += 1
+        prompt = _history_to_prompt(history, window=history_window_messages)
+        pair_rec = {
+            "id": f"{conv_id}_t{turn:02d}",
+            "conversation_id": conv_id,
+            "turn": turn,
+            "topic": topic,
+            "prompt": prompt,
+            "response": m["content"],
+            "task_type": "followup_clarification",
+            "content_type": "chat_multiturn",
+            "lang_mode": _infer_lang_mode(f"{prompt} {m['content']}"),
+            "source": source,
+            "teacher_model": model_name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        append_jsonl(pairs_path, pair_rec)
+        pairs_written += 1
+        history.append(m)
+
+    return True, "ok", pairs_written
 
 
 def main() -> int:
@@ -522,9 +485,8 @@ def main() -> int:
         )
 
     out_prefix = Path(args.output_prefix)
-    final_path = _out_path(out_prefix, "final.jsonl")
-    local_path = _out_path(out_prefix, "accepted_local.jsonl")
-    organized_path = _out_path(out_prefix, "accepted_organized.jsonl")
+    dialogues_path = _out_path(out_prefix, "dialogues.jsonl")
+    pairs_path = _out_path(out_prefix, "pairs.jsonl")
     rejects_path = _out_path(out_prefix, "rejects.jsonl")
     errors_path = _out_path(out_prefix, "errors.jsonl")
     raw_path = _out_path(out_prefix, "raw.jsonl")
@@ -537,8 +499,8 @@ def main() -> int:
     flash_cfg = GeminiConfig(
         model=args.gemini_model,
         api_key=gemini_key,
-        temperature=0.0,
-        top_p=0.1,
+        temperature=0.2,
+        top_p=0.9,
         max_output_tokens=(int(args.max_output_tokens) if int(args.max_output_tokens) > 0 else None),
         max_retries=int(args.max_retries),
         retry_backoff_sec=float(args.retry_backoff_sec),
@@ -547,7 +509,7 @@ def main() -> int:
         model=args.organizer_model,
         api_key=openai_key,
         temperature=0.0,
-        max_output_tokens=300,
+        max_output_tokens=800,
         max_retries=int(args.max_retries),
         retry_backoff_sec=float(args.retry_backoff_sec),
     )
@@ -557,12 +519,9 @@ def main() -> int:
     consecutive_fail = 0
 
     with PromptDedupIndex(Path(args.dedup_db)) as dedup:
-        while (int(state.get("accepted_local", 0)) + int(state.get("accepted_organized", 0))) < int(args.target):
+        while (int(state.get("accepted_local", 0)) + int(state.get("accepted_organized", 0))) < int(args.target_dialogues):
             topic = topics[topic_index % len(topics)]
-            required_task_type = TASK_TYPE_CYCLE[topic_index % len(TASK_TYPE_CYCLE)]
             accepted_before = int(state.get("accepted_local", 0)) + int(state.get("accepted_organized", 0))
-            remaining = int(args.target) - accepted_before
-            batch_n = max(1, min(int(args.flash_batch_size), remaining))
             avoid_prompts, frequent_patterns = _collect_avoid_memory(
                 dedup,
                 topic,
@@ -571,16 +530,14 @@ def main() -> int:
                 pattern_topk=int(args.avoid_pattern_topk),
             )
             raw_text = ""
-            parse_reason = ""
-            local_failures: list[str] = []
+            local_reason = ""
             try:
                 raw_text = generate_text(
                     flash_cfg,
                     user_prompt=_build_flash_user_prompt(
                         topic,
-                        batch_n,
-                        required_task_type=required_task_type,
-                        targeting_mode=str(args.task_type_targeting),
+                        min_turns=int(args.min_turns),
+                        max_turns=int(args.max_turns),
                         avoid_prompts=avoid_prompts,
                         frequent_patterns=frequent_patterns,
                     ),
@@ -593,111 +550,113 @@ def main() -> int:
                         "topic": topic,
                         "raw_output": raw_text,
                         "model": args.gemini_model,
-                        "requested_items": batch_n,
                         "created_at": datetime.now(timezone.utc).isoformat(),
                     },
                 )
 
-                flash_items: list[dict[str, Any]] = []
                 try:
                     payload = _extract_json_block(raw_text)
-                    flash_items = _payload_items(payload)
-                    if not flash_items:
-                        parse_reason = "parsed_without_required_fields"
-                except (ValueError, json.JSONDecodeError) as e:
-                    parse_reason = f"invalid_json_output:{e}"
-
-                for item in flash_items:
-                    if (int(state.get("accepted_local", 0)) + int(state.get("accepted_organized", 0))) >= int(args.target):
-                        break
-                    accepted, reason = _accept_record(
-                        item=item,
-                        topic=topic,
-                        source="flash_local",
-                        model_name=args.gemini_model,
-                        dedup=dedup,
-                        dedup_threshold=float(args.near_dup_threshold),
-                        dedup_topic_limit=int(args.near_dup_topic_limit),
-                        dedup_global_limit=int(args.near_dup_global_limit),
-                        required_task_type=required_task_type,
-                        targeting_mode=str(args.task_type_targeting),
-                        final_path=final_path,
-                        local_path=local_path,
-                        organized_path=organized_path,
+                    msgs = _extract_messages(payload)
+                    ok, reason = _validate_messages(
+                        msgs,
+                        min_turns=int(args.min_turns),
+                        max_turns=int(args.max_turns),
                     )
-                    if accepted:
-                        state["accepted_local"] = int(state.get("accepted_local", 0)) + 1
+                    if ok:
+                        accepted, reason2, n_pairs = _accept_dialogue(
+                            messages=msgs,
+                            topic=topic,
+                            source="flash_local",
+                            model_name=args.gemini_model,
+                            dedup=dedup,
+                            near_dup_threshold=float(args.near_dup_threshold),
+                            near_dup_topic_limit=int(args.near_dup_topic_limit),
+                            near_dup_global_limit=int(args.near_dup_global_limit),
+                            dialogues_path=dialogues_path,
+                            pairs_path=pairs_path,
+                            history_window_messages=int(args.history_window_messages),
+                        )
+                        if accepted:
+                            state["accepted_local"] = int(state.get("accepted_local", 0)) + 1
+                            state["pairs_written"] = int(state.get("pairs_written", 0)) + n_pairs
+                        else:
+                            local_reason = reason2
                     else:
-                        local_failures.append(reason)
+                        local_reason = reason
+                except (ValueError, json.JSONDecodeError) as e:
+                    local_reason = f"invalid_json_output:{e}"
 
-                # Organizer pass for parse/validation failures or partial local rejects.
-                need_organizer = bool(parse_reason or local_failures)
-                if need_organizer and ((int(state.get("accepted_local", 0)) + int(state.get("accepted_organized", 0))) < int(args.target)):
-                    fail_summary = parse_reason or ",".join(sorted(set(local_failures))[:8])
+                if local_reason and ((int(state.get("accepted_local", 0)) + int(state.get("accepted_organized", 0))) < int(args.target_dialogues)):
                     org_text = chat_completion(
                         org_cfg,
                         system_prompt=ORGANIZER_SYSTEM_PROMPT,
                         user_prompt=_build_organizer_user_prompt(
                             topic=topic,
                             raw_text=raw_text,
-                            failure_reason=fail_summary,
-                            n=batch_n,
-                            required_task_type=required_task_type,
-                            targeting_mode=str(args.task_type_targeting),
+                            failure_reason=local_reason,
+                            min_turns=int(args.min_turns),
+                            max_turns=int(args.max_turns),
                             avoid_prompts=avoid_prompts,
                             frequent_patterns=frequent_patterns,
                         ),
                     )
                     state["organizer_calls"] = int(state.get("organizer_calls", 0)) + 1
-                    org_obj = _extract_json_block(org_text)
-                    if "reject_reason" in org_obj:
+                    org_payload = _extract_json_block(org_text)
+                    if "reject_reason" in org_payload:
                         state["rejected"] = int(state.get("rejected", 0)) + 1
-                        consecutive_429 = 0
-                        consecutive_parse = 0
-                        consecutive_fail = 0
                         append_jsonl(
                             rejects_path,
                             {
                                 "topic": topic,
-                                "reason": normalize_text(org_obj.get("reject_reason", "organizer_reject")),
+                                "reason": normalize_text(org_payload.get("reject_reason", "organizer_reject")),
                                 "raw_output": raw_text,
                                 "organizer_output": org_text,
                             },
                         )
                     else:
-                        org_items = _payload_items(org_obj)
-                        if not org_items:
-                            raise ValueError("organizer_items_not_list")
-                        for item in org_items:
-                            if (int(state.get("accepted_local", 0)) + int(state.get("accepted_organized", 0))) >= int(args.target):
-                                break
-                            accepted, reason = _accept_record(
-                                item=item,
+                        org_msgs = _extract_messages(org_payload)
+                        ok, reason = _validate_messages(
+                            org_msgs,
+                            min_turns=int(args.min_turns),
+                            max_turns=int(args.max_turns),
+                        )
+                        if not ok:
+                            state["rejected"] = int(state.get("rejected", 0)) + 1
+                            append_jsonl(
+                                rejects_path,
+                                {
+                                    "topic": topic,
+                                    "reason": reason,
+                                    "raw_output": raw_text,
+                                    "organizer_output": org_text,
+                                },
+                            )
+                        else:
+                            accepted, reason2, n_pairs = _accept_dialogue(
+                                messages=org_msgs,
                                 topic=topic,
                                 source="organized_gpt",
                                 model_name=args.organizer_model,
                                 dedup=dedup,
-                                dedup_threshold=float(args.near_dup_threshold),
-                                dedup_topic_limit=int(args.near_dup_topic_limit),
-                                dedup_global_limit=int(args.near_dup_global_limit),
-                                required_task_type=required_task_type,
-                                targeting_mode=str(args.task_type_targeting),
-                                final_path=final_path,
-                                local_path=local_path,
-                                organized_path=organized_path,
+                                near_dup_threshold=float(args.near_dup_threshold),
+                                near_dup_topic_limit=int(args.near_dup_topic_limit),
+                                near_dup_global_limit=int(args.near_dup_global_limit),
+                                dialogues_path=dialogues_path,
+                                pairs_path=pairs_path,
+                                history_window_messages=int(args.history_window_messages),
                             )
                             if accepted:
                                 state["accepted_organized"] = int(state.get("accepted_organized", 0)) + 1
+                                state["pairs_written"] = int(state.get("pairs_written", 0)) + n_pairs
                             else:
                                 state["rejected"] = int(state.get("rejected", 0)) + 1
                                 append_jsonl(
                                     rejects_path,
                                     {
                                         "topic": topic,
-                                        "reason": reason,
+                                        "reason": reason2,
                                         "raw_output": raw_text,
                                         "organizer_output": org_text,
-                                        "item": item,
                                     },
                                 )
 
@@ -711,7 +670,7 @@ def main() -> int:
                     errors_path,
                     {
                         "topic": topic,
-                        "reason": "hybrid_generation_error",
+                        "reason": "chat_hybrid_error",
                         "error": str(e),
                         "raw_output": raw_text,
                     },
@@ -732,7 +691,7 @@ def main() -> int:
                 print(
                     "accepted_local="
                     f"{state['accepted_local']} accepted_organized={state['accepted_organized']} "
-                    f"rejected={state['rejected']} failed_calls={state['failed_calls']} "
+                    f"pairs_written={state['pairs_written']} rejected={state['rejected']} failed_calls={state['failed_calls']} "
                     f"topic_index={state['topic_index']} dedup_entries={state['dedup_db_entries']} "
                     f"cb429={consecutive_429} cbparse={consecutive_parse} cbfail={consecutive_fail}"
                 )

@@ -28,6 +28,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def _key_for_split(record: dict) -> str:
+    # Keep all turns from one conversation in the same split to avoid leakage.
+    conv_id = normalize_text(record.get("conversation_id", ""))
+    if conv_id:
+        return f"conversation:{conv_id}"
     rid = normalize_text(record.get("id", ""))
     if rid:
         return rid

@@ -35,11 +35,11 @@ python scripts/eval_sft.py \
 python scripts/eval_sft_gate.py \
   --eval_report outputs/reports/eval_sft.json \
   --output outputs/reports/eval_sft_gate.json \
-  --require_better_val_ppl \
-  --require_better_test_ppl \
   --max_english_drift_delta 0.0 \
   --min_rw_marker_density_delta 0.0
 ```
+
+`eval_sft_gate.py` is strict by default (requires better val/test perplexity).
 
 ## Gemini Distillation Data Pipeline
 
@@ -136,6 +136,28 @@ Main outputs:
 - `outputs/sft/prompts.seed.hybrid.rejects.jsonl`
 - `outputs/sft/prompts.seed.hybrid.errors.jsonl`
 - `outputs/sft/prompts.seed.hybrid.state.json`
+
+Hybrid chat-seed pipeline (Flash dialogues + GPT organizer, then flatten to SFT pairs):
+
+```bash
+python scripts/build_chat_seed_hybrid.py
+```
+
+Main outputs:
+- `outputs/sft/chat.seed.hybrid.dialogues.jsonl` (multi-turn conversations)
+- `outputs/sft/chat.seed.hybrid.pairs.jsonl` (flattened prompt/response SFT records)
+- `outputs/sft/chat.seed.hybrid.rejects.jsonl`
+- `outputs/sft/chat.seed.hybrid.errors.jsonl`
+- `outputs/sft/chat.seed.hybrid.state.json`
+
+Content-mix validation before full SFT:
+
+```bash
+python scripts/validate_sft_content_mix.py \
+  --input_jsonl /path/to/generated.clean.jsonl \
+  --plan_json configs/sft_content_mix_v1.json \
+  --output outputs/reports/sft_content_mix_report.json
+```
 
 TLS/SSL troubleshooting (macOS):
 

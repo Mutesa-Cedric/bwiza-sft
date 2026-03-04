@@ -19,10 +19,13 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evaluate SFT promotion gate")
     p.add_argument("--eval_report", required=True)
     p.add_argument("--output", default="outputs/reports/eval_sft_gate.json")
-    p.add_argument("--require_better_val_ppl", action="store_true", default=False)
-    p.add_argument("--require_better_test_ppl", action="store_true", default=False)
+    p.add_argument("--require_better_val_ppl", dest="require_better_val_ppl", action="store_true")
+    p.add_argument("--no_require_better_val_ppl", dest="require_better_val_ppl", action="store_false")
+    p.add_argument("--require_better_test_ppl", dest="require_better_test_ppl", action="store_true")
+    p.add_argument("--no_require_better_test_ppl", dest="require_better_test_ppl", action="store_false")
     p.add_argument("--max_english_drift_delta", type=float, default=0.0)
     p.add_argument("--min_rw_marker_density_delta", type=float, default=0.0)
+    p.set_defaults(require_better_val_ppl=True, require_better_test_ppl=True)
     return p.parse_args()
 
 

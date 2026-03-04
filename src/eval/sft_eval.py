@@ -156,6 +156,7 @@ def evaluate_generation(model, tokenizer, prompts: list[str], device: torch.devi
         for p in prompts:
             input_text = f"User: {p}\nAssistant: "
             inputs = tokenizer(input_text, return_tensors="pt").to(device)
+            input_len = int(inputs["input_ids"].shape[1])
             out = model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
@@ -163,7 +164,8 @@ def evaluate_generation(model, tokenizer, prompts: list[str], device: torch.devi
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
             )
-            text = tokenizer.decode(out[0], skip_special_tokens=True)
+            new_tokens = out[0][input_len:]
+            text = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
             drift = english_drift_score(text)
             rw_density = _rw_marker_density(text)
             samples.append(

@@ -28,30 +28,46 @@ def _normalize_text(x: object) -> str:
     return " ".join(x.strip().split())
 
 
-def _extract_prompt_response(obj: dict) -> tuple[str, str]:
+def _messages_to_pairs(messages: list[dict]) -> list[tuple[str, str]]:
+    norm: list[tuple[str, str]] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = _normalize_text(m.get("role", "")).lower()
+        content = _normalize_text(m.get("content", ""))
+        if role in {"user", "assistant"} and content:
+            norm.append((role, content))
+
+    pairs: list[tuple[str, str]] = []
+    history: list[tuple[str, str]] = []
+    for role, content in norm:
+        if role == "user":
+            history.append((role, content))
+            continue
+        if not history:
+            continue
+        prompt_lines = [f"{'User' if r == 'user' else 'Assistant'}: {c}" for r, c in history]
+        prompt = _normalize_text("\n".join(prompt_lines))
+        if prompt:
+            pairs.append((prompt, content))
+        history.append((role, content))
+    return pairs
+
+
+def _extract_prompt_response_pairs(obj: dict) -> list[tuple[str, str]]:
     if "prompt" in obj and "response" in obj:
-        return _normalize_text(obj.get("prompt")), _normalize_text(obj.get("response"))
+        return [(_normalize_text(obj.get("prompt")), _normalize_text(obj.get("response")))]
 
     if "instruction" in obj and "output" in obj:
         instr = _normalize_text(obj.get("instruction"))
         inp = _normalize_text(obj.get("input"))
         prompt = instr if not inp else f"{instr}\n{inp}"
-        return prompt, _normalize_text(obj.get("output"))
+        return [(prompt, _normalize_text(obj.get("output")))]
 
     if "messages" in obj and isinstance(obj["messages"], list):
-        msgs = [m for m in obj["messages"] if isinstance(m, dict)]
-        user = ""
-        assistant = ""
-        for m in msgs:
-            role = _normalize_text(m.get("role", "")).lower()
-            content = _normalize_text(m.get("content", ""))
-            if role == "user" and content and not user:
-                user = content
-            elif role == "assistant" and content and not assistant:
-                assistant = content
-        return user, assistant
+        return _messages_to_pairs(obj["messages"])
 
-    return "", ""
+    return []
 
 
 def iter_prompt_response(path: str | Path):
@@ -67,9 +83,10 @@ def iter_prompt_response(path: str | Path):
                 continue
             if not isinstance(obj, dict):
                 continue
-            prompt, response = _extract_prompt_response(obj)
-            if prompt and response:
-                yield i, prompt, response
+            pairs = _extract_prompt_response_pairs(obj)
+            for prompt, response in pairs:
+                if prompt and response:
+                    yield i, prompt, response
 
 
 def iter_tokenized_examples(
@@ -124,13 +141,20 @@ def summarize_jsonl(path: str | Path) -> SFTSummary:
             if not isinstance(obj, dict):
                 bad += 1
                 continue
-            prompt, response = _extract_prompt_response(obj)
-            if not prompt or not response:
+            pairs = _extract_prompt_response_pairs(obj)
+            if not pairs:
                 bad += 1
                 continue
-            valid += 1
-            pchars += len(prompt)
-            rchars += len(response)
+            any_valid = False
+            for prompt, response in pairs:
+                if not prompt or not response:
+                    continue
+                any_valid = True
+                valid += 1
+                pchars += len(prompt)
+                rchars += len(response)
+            if not any_valid:
+                bad += 1
 
     return SFTSummary(
         path=str(p),
@@ -150,7 +174,11 @@ def build_sft_tokens(
     user_prefix: str = "User: ",
     assistant_prefix: str = "Assistant: ",
 ) -> tuple[list[int], list[int], int] | None:
-    prompt_text = f"{user_prefix}{prompt}\n{assistant_prefix}"
+    prompt_norm = _normalize_text(prompt)
+    if prompt_norm.startswith(user_prefix):
+        prompt_text = f"{prompt_norm}\n{assistant_prefix}"
+    else:
+        prompt_text = f"{user_prefix}{prompt_norm}\n{assistant_prefix}"
     full_text = f"{prompt_text}{response}{tokenizer.eos_token or ''}"
 
     p_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]

@@ -44,6 +44,20 @@ python scripts/clean_sft_generated.py \
   --input_jsonl "$RAW" \
   --output_jsonl "$CLEAN"
 
+if [[ -f "configs/sft_content_mix_v1.json" ]]; then
+  if [[ "${STRICT_MIX:-0}" == "1" ]]; then
+    python scripts/validate_sft_content_mix.py \
+      --input_jsonl "$CLEAN" \
+      --plan_json configs/sft_content_mix_v1.json \
+      --output "$WORKDIR/sft_content_mix_report.json"
+  else
+    python scripts/validate_sft_content_mix.py \
+      --input_jsonl "$CLEAN" \
+      --plan_json configs/sft_content_mix_v1.json \
+      --output "$WORKDIR/sft_content_mix_report.json" || true
+  fi
+fi
+
 python scripts/split_sft_dataset.py \
   --input_jsonl "$CLEAN" \
   --train_jsonl "$TRAIN" \

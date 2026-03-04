@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 from pathlib import Path
+import random
 import subprocess
 import sys
 
@@ -18,6 +19,24 @@ if str(ROOT) not in sys.path:
 from src.data.fingerprint import dataset_fingerprint
 from src.train.manifest import RunManifest
 from src.train.wandb_logger import WandbLogger
+
+
+def _set_seed(seed: int) -> None:
+    random.seed(seed)
+    try:
+        import numpy as np
+
+        np.random.seed(seed)
+    except Exception:
+        pass
+    try:
+        import torch
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except Exception:
+        pass
 
 
 def _git_commit() -> str:
@@ -60,6 +79,8 @@ def main() -> int:
         raise FileNotFoundError(f"Missing test jsonl: {args.test_jsonl}")
 
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    run_seed = int(cfg.get("run", {}).get("seed", 42))
+    _set_seed(run_seed)
     cfg_fp = hashlib.sha256(config_path.read_bytes()).hexdigest()
     ds_fp = dataset_fingerprint(args.train_jsonl, args.val_jsonl, args.test_jsonl)
 

@@ -127,8 +127,7 @@ def run_sft(
     elif resume_from:
         checkpoint_path = str(resume_from)
     else:
-        last = latest_checkpoint(output_dir)
-        checkpoint_path = str(last) if last else ""
+        checkpoint_path = ""
 
     load_from = checkpoint_path if checkpoint_path else model_name
 

@@ -47,6 +47,12 @@ ALLOWED_TASK_TYPES = {
     "code_switch_instruction",
     "multilingual_retention",
     "language_control",
+    "followup_clarification",
+    "safety_refusal",
+    "transformation",
+    "structured_output",
+    "noisy_input_robustness",
+    "open_domain_chat",
 }
 
 ALLOWED_LANG_MODES = {
@@ -63,7 +69,28 @@ TASK_LANG_MODE_COMPAT: dict[str, set[str]] = {
     "code_switch_instruction": {"rw_mixed"},
     "multilingual_retention": {"en", "fr", "sw"},
     "language_control": {"control"},
+    "followup_clarification": {"rw", "rw_mixed"},
+    "safety_refusal": {"rw", "rw_mixed", "control"},
+    "transformation": {"rw", "rw_mixed", "en", "fr", "sw"},
+    "structured_output": {"rw", "rw_mixed", "en", "fr", "sw"},
+    "noisy_input_robustness": {"rw", "rw_mixed"},
+    "open_domain_chat": {"rw", "rw_mixed", "en", "fr", "sw"},
 }
+
+TASK_TYPE_ENUM_LIST = [
+    "rw_instruction",
+    "code_switch_instruction",
+    "multilingual_retention",
+    "language_control",
+    "followup_clarification",
+    "safety_refusal",
+    "transformation",
+    "structured_output",
+    "noisy_input_robustness",
+    "open_domain_chat",
+]
+
+TASK_TYPE_ENUM = "|".join(TASK_TYPE_ENUM_LIST)
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a senior native Kinyarwanda linguist and LLM data curator. "
@@ -92,12 +119,7 @@ PROMPT_SEED_RESPONSE_SCHEMA_BATCH: dict = {
                     "prompt": {"type": "string"},
                     "task_type": {
                         "type": "string",
-                        "enum": [
-                            "rw_instruction",
-                            "code_switch_instruction",
-                            "multilingual_retention",
-                            "language_control",
-                        ],
+                        "enum": TASK_TYPE_ENUM_LIST,
                     },
                     "lang_mode": {
                         "type": "string",
@@ -117,12 +139,7 @@ PROMPT_SEED_RESPONSE_SCHEMA_SINGLE: dict = {
         "prompt": {"type": "string"},
         "task_type": {
             "type": "string",
-            "enum": [
-                "rw_instruction",
-                "code_switch_instruction",
-                "multilingual_retention",
-                "language_control",
-            ],
+            "enum": TASK_TYPE_ENUM_LIST,
         },
         "lang_mode": {
             "type": "string",
@@ -349,7 +366,7 @@ def _extract_partial_item(text: str) -> dict | None:
     # {"prompt":"...","task_type":"rw_instruction","lang_mode":"rw"
     prompt_m = re.search(r'"prompt"\s*:\s*"((?:\\.|[^"\\])*)"', text)
     task_m = re.search(
-        r'"task_type"\s*:\s*"(rw_instruction|code_switch_instruction|multilingual_retention|language_control)"',
+        rf'"task_type"\s*:\s*"({TASK_TYPE_ENUM})"',
         text,
     )
     lang_m = re.search(r'"lang_mode"\s*:\s*"(rw|rw_mixed|en|fr|sw|control)"', text)
@@ -368,12 +385,16 @@ def _extract_partial_item(text: str) -> dict | None:
 def _build_repair_prompt(broken_text: str, n: int) -> str:
     if n <= 1:
         schema = (
-            '{"prompt":"<string>","task_type":"rw_instruction|code_switch_instruction|multilingual_retention|language_control",'
+            '{"prompt":"<string>","task_type":"'
+            + TASK_TYPE_ENUM
+            + '",'
             '"lang_mode":"rw|rw_mixed|en|fr|sw|control"}'
         )
     else:
         schema = (
-            '{"items":[{"prompt":"<string>","task_type":"rw_instruction|code_switch_instruction|multilingual_retention|language_control",'
+            '{"items":[{"prompt":"<string>","task_type":"'
+            + TASK_TYPE_ENUM
+            + '",'
             '"lang_mode":"rw|rw_mixed|en|fr|sw|control"}]}'
         )
     return (
@@ -403,7 +424,9 @@ def _build_user_prompt(topic: str, n: int, avoid_prompts: list[str], frequent_pa
             "No markdown. No code fences. No prose.\\n"
             "JSON must end with '}'.\\n"
             "Schema exactly:\\n"
-            "{\"prompt\":\"<string>\",\"task_type\":\"rw_instruction|code_switch_instruction|multilingual_retention|language_control\",\"lang_mode\":\"rw|rw_mixed|en|fr|sw|control\"}\\n"
+            "{\"prompt\":\"<string>\",\"task_type\":\""
+            + TASK_TYPE_ENUM
+            + "\",\"lang_mode\":\"rw|rw_mixed|en|fr|sw|control\"}\\n"
             "Rules:\\n"
             + avoid_block
             + "- Prompt must be realistic and <= 220 chars.\\n"
@@ -417,7 +440,9 @@ def _build_user_prompt(topic: str, n: int, avoid_prompts: list[str], frequent_pa
         "Return ONLY one minified JSON object.\\n"
         "No markdown. No code fences. No prose.\\n"
         "Schema exactly:\\n"
-        "{\"items\":[{\"prompt\":\"...\",\"task_type\":\"rw_instruction|code_switch_instruction|multilingual_retention|language_control\",\"lang_mode\":\"rw|rw_mixed|en|fr|sw|control\"}]}\\n"
+        "{\"items\":[{\"prompt\":\"...\",\"task_type\":\""
+        + TASK_TYPE_ENUM
+        + "\",\"lang_mode\":\"rw|rw_mixed|en|fr|sw|control\"}]}\\n"
         "Rules:\\n"
         + avoid_block
         + "- At least 50% items with lang_mode=rw.\\n"

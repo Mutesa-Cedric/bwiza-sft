@@ -167,8 +167,8 @@ def main() -> int:
 
         try:
             response = generate_text(cfg, user_prompt=user_prompt, system_prompt=sys_prompt)
-            append_jsonl(
-                output_path,
+            rec = dict(obj)
+            rec.update(
                 {
                     "id": rid,
                     "prompt": prompt,
@@ -177,7 +177,11 @@ def main() -> int:
                     "source": "gemini_distill",
                     "line_no": line_no,
                     "created_at": datetime.now(timezone.utc).isoformat(),
-                },
+                }
+            )
+            append_jsonl(
+                output_path,
+                rec,
             )
             state["succeeded"] = int(state.get("succeeded", 0)) + 1
             generated += 1

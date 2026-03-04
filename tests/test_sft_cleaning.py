@@ -17,3 +17,10 @@ def test_dedup_key_normalizes() -> None:
     a = dedup_key(" Muraho  ", "Ni meza")
     b = dedup_key("muraho", "Ni   meza")
     assert a == b
+
+
+def test_clean_decision_rejects_word_repetition() -> None:
+    cfg = CleanConfig(min_prompt_chars=3, min_response_chars=5, max_response_chars=200, max_consecutive_repeat_words=4)
+    d = clean_decision("Sobanura", "ni ni ni ni ni ni", cfg)
+    assert not d.keep
+    assert d.reason == "response_word_repetition"

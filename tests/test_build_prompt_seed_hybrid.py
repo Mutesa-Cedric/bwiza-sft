@@ -25,6 +25,8 @@ def test_build_flash_user_prompt_mentions_exact_count() -> None:
     text = mod._build_flash_user_prompt(
         "uburezi mu Rwanda",
         4,
+        required_task_type="rw_instruction",
+        targeting_mode="soft",
         avoid_prompts=["A", "B"],
         frequent_patterns=["Sobanura ..."],
     )
@@ -32,6 +34,12 @@ def test_build_flash_user_prompt_mentions_exact_count() -> None:
     assert '"items"' in text
     assert "Avoid same/very similar prompts as" in text
     assert "Avoid these common openings" in text
+
+
+def test_out_path_preserves_prefix_literal() -> None:
+    mod = _load_module()
+    p = mod._out_path(Path("outputs/sft/prompts.seed.hybrid"), "final.jsonl")
+    assert str(p).endswith("outputs/sft/prompts.seed.hybrid.final.jsonl")
 
 
 def test_validate_item_task_lang_mode_mismatch() -> None:
