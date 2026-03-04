@@ -106,6 +106,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--near_dup_threshold", type=float, default=0.9)
     p.add_argument("--near_dup_topic_limit", type=int, default=200)
     p.add_argument("--near_dup_global_limit", type=int, default=400)
+    p.add_argument("--avoid_topic_recent", type=int, default=12)
+    p.add_argument("--avoid_global_recent", type=int, default=12)
+    p.add_argument("--avoid_pattern_topk", type=int, default=8)
     p.add_argument("--cb_consecutive_429", type=int, default=12)
     p.add_argument("--cb_consecutive_parse", type=int, default=12)
     p.add_argument("--cb_consecutive_fail", type=int, default=30)
@@ -236,7 +239,20 @@ def _validate_item(item: dict[str, Any]) -> tuple[bool, str]:
     return True, "ok"
 
 
-def _build_flash_user_prompt(topic: str, n: int) -> str:
+def _build_flash_user_prompt(
+    topic: str,
+    n: int,
+    *,
+    avoid_prompts: list[str],
+    frequent_patterns: list[str],
+) -> str:
+    avoid_block = ""
+    if avoid_prompts:
+        avoid_block += "Avoid same/very similar prompts as:\n"
+        avoid_block += "\n".join([f"- {p}" for p in avoid_prompts]) + "\n"
+    if frequent_patterns:
+        avoid_block += "Avoid these common openings:\n"
+        avoid_block += "\n".join([f"- {p}" for p in frequent_patterns]) + "\n"
     return (
         "Create prompt-seed items for supervised fine-tuning.\n"
         f"Topic: {topic}\n"
@@ -247,11 +263,27 @@ def _build_flash_user_prompt(topic: str, n: int) -> str:
         "Rules:\n"
         "- prompt must be realistic and <= 220 chars\n"
         "- no answer text, prompt only\n"
-        "- output JSON only"
+        + avoid_block
+        + "- output JSON only"
     )
 
 
-def _build_organizer_user_prompt(*, topic: str, raw_text: str, failure_reason: str, n: int) -> str:
+def _build_organizer_user_prompt(
+    *,
+    topic: str,
+    raw_text: str,
+    failure_reason: str,
+    n: int,
+    avoid_prompts: list[str],
+    frequent_patterns: list[str],
+) -> str:
+    avoid_block = ""
+    if avoid_prompts:
+        avoid_block += "Do not return prompts same/very similar to:\n"
+        avoid_block += "\n".join([f"- {p}" for p in avoid_prompts]) + "\n"
+    if frequent_patterns:
+        avoid_block += "Avoid these common openings:\n"
+        avoid_block += "\n".join([f"- {p}" for p in frequent_patterns]) + "\n"
     return (
         "Normalize the raw model output into valid prompt-seed JSON.\n"
         f"Topic: {topic}\n"
@@ -262,7 +294,8 @@ def _build_organizer_user_prompt(*, topic: str, raw_text: str, failure_reason: s
         "\"lang_mode\":\"rw|rw_mixed|en|fr|sw|control\"}]}\n"
         "OR\n"
         "{\"reject_reason\":\"<short_reason>\"}\n"
-        "Raw output follows:\n"
+        + avoid_block
+        + "Raw output follows:\n"
         f"{raw_text}"
     )
 
@@ -274,6 +307,28 @@ def _payload_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if {"prompt", "task_type", "lang_mode"}.issubset(set(payload.keys())):
         return [payload]
     return []
+
+
+def _collect_avoid_memory(
+    dedup: PromptDedupIndex,
+    topic: str,
+    *,
+    topic_recent: int,
+    global_recent: int,
+    pattern_topk: int,
+) -> tuple[list[str], list[str]]:
+    topic_prompts = dedup.recent_prompts(limit=max(0, topic_recent), topic=topic)
+    global_prompts = dedup.recent_prompts(limit=max(0, global_recent), topic="")
+    merged: list[str] = []
+    seen: set[str] = set()
+    for p in topic_prompts + global_prompts:
+        key = normalize_text(p).lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(normalize_text(p))
+    patterns = dedup.frequent_patterns(limit=max(0, pattern_topk))
+    return merged, patterns
 
 
 def _classify_failure(err: str) -> tuple[bool, bool]:
@@ -446,13 +501,25 @@ def main() -> int:
             accepted_before = int(state.get("accepted_local", 0)) + int(state.get("accepted_organized", 0))
             remaining = int(args.target) - accepted_before
             batch_n = max(1, min(int(args.flash_batch_size), remaining))
+            avoid_prompts, frequent_patterns = _collect_avoid_memory(
+                dedup,
+                topic,
+                topic_recent=int(args.avoid_topic_recent),
+                global_recent=int(args.avoid_global_recent),
+                pattern_topk=int(args.avoid_pattern_topk),
+            )
             raw_text = ""
             parse_reason = ""
             local_failures: list[str] = []
             try:
                 raw_text = generate_text(
                     flash_cfg,
-                    user_prompt=_build_flash_user_prompt(topic, batch_n),
+                    user_prompt=_build_flash_user_prompt(
+                        topic,
+                        batch_n,
+                        avoid_prompts=avoid_prompts,
+                        frequent_patterns=frequent_patterns,
+                    ),
                     system_prompt=FLASH_SYSTEM_PROMPT,
                 )
                 state["flash_calls"] = int(state.get("flash_calls", 0)) + 1
@@ -509,6 +576,8 @@ def main() -> int:
                             raw_text=raw_text,
                             failure_reason=fail_summary,
                             n=batch_n,
+                            avoid_prompts=avoid_prompts,
+                            frequent_patterns=frequent_patterns,
                         ),
                     )
                     state["organizer_calls"] = int(state.get("organizer_calls", 0)) + 1

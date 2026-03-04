@@ -22,9 +22,16 @@ def test_payload_items_accepts_batch_and_single() -> None:
 
 def test_build_flash_user_prompt_mentions_exact_count() -> None:
     mod = _load_module()
-    text = mod._build_flash_user_prompt("uburezi mu Rwanda", 4)
+    text = mod._build_flash_user_prompt(
+        "uburezi mu Rwanda",
+        4,
+        avoid_prompts=["A", "B"],
+        frequent_patterns=["Sobanura ..."],
+    )
     assert "Need exactly 4 items." in text
     assert '"items"' in text
+    assert "Avoid same/very similar prompts as" in text
+    assert "Avoid these common openings" in text
 
 
 def test_validate_item_task_lang_mode_mismatch() -> None:
@@ -51,3 +58,26 @@ def test_circuit_break_reason_prefers_429() -> None:
         max_consecutive_fail=100,
     )
     assert reason == "consecutive_429_limit_reached"
+
+
+def test_collect_avoid_memory_merges_unique_and_patterns() -> None:
+    mod = _load_module()
+
+    class _FakeDedup:
+        def recent_prompts(self, limit: int, topic: str = ""):
+            if topic:
+                return ["Prompt A", "Prompt B"]
+            return ["Prompt B", "Prompt C"]
+
+        def frequent_patterns(self, limit: int):
+            return ["Sobanura ...", "Ni gute ..."][:limit]
+
+    avoid, patterns = mod._collect_avoid_memory(
+        _FakeDedup(),
+        "uburezi mu Rwanda",
+        topic_recent=10,
+        global_recent=10,
+        pattern_topk=2,
+    )
+    assert avoid == ["Prompt A", "Prompt B", "Prompt C"]
+    assert patterns == ["Sobanura ...", "Ni gute ..."]
