@@ -20,8 +20,9 @@ class GeminiConfig:
     temperature: float = 0.4
     top_p: float = 0.95
     max_output_tokens: int | None = None
-    max_retries: int = 5
-    retry_backoff_sec: float = 1.5
+    max_retries: int = 8
+    retry_backoff_sec: float = 2.0
+    request_timeout_sec: float = 30.0
     response_mime_type: str = ""
     response_schema: dict[str, Any] | None = None
 
@@ -95,7 +96,7 @@ def generate_text(cfg: GeminiConfig, user_prompt: str, system_prompt: str = "") 
     ctx = _ssl_context()
     for attempt in range(1, cfg.max_retries + 1):
         try:
-            with request.urlopen(req, timeout=120, context=ctx) as resp:
+            with request.urlopen(req, timeout=float(cfg.request_timeout_sec), context=ctx) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
                 text = _extract_text(payload)
                 if not text:

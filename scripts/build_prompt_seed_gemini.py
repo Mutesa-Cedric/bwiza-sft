@@ -67,8 +67,8 @@ ALLOWED_LANG_MODES = {
 TASK_LANG_MODE_COMPAT: dict[str, set[str]] = {
     "rw_instruction": {"rw"},
     "code_switch_instruction": {"rw_mixed"},
-    "multilingual_retention": {"en", "fr", "sw"},
-    "language_control": {"control"},
+    "multilingual_retention": {"en", "fr", "sw", "rw_mixed"},
+    "language_control": {"control", "rw", "rw_mixed", "en", "fr", "sw"},
     "followup_clarification": {"rw", "rw_mixed"},
     "safety_refusal": {"rw", "rw_mixed", "control"},
     "transformation": {"rw", "rw_mixed", "en", "fr", "sw"},
@@ -174,8 +174,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--temperature", type=float, default=0.0)
     p.add_argument("--top_p", type=float, default=0.1)
     p.add_argument("--max_output_tokens", type=int, default=0)
-    p.add_argument("--max_retries", type=int, default=5)
-    p.add_argument("--retry_backoff_sec", type=float, default=1.5)
+    p.add_argument("--max_retries", type=int, default=8)
+    p.add_argument("--retry_backoff_sec", type=float, default=2.0)
+    p.add_argument("--request_timeout_sec", type=float, default=30.0)
     p.add_argument("--parse_retries", type=int, default=3)
     p.add_argument("--candidate_pool", type=int, default=1)
     p.add_argument("--avoid_topic_recent", type=int, default=8)
@@ -605,6 +606,7 @@ def main() -> int:
                         max_output_tokens=(int(args.max_output_tokens) if int(args.max_output_tokens) > 0 else None),
                         max_retries=int(args.max_retries),
                         retry_backoff_sec=float(args.retry_backoff_sec),
+                        request_timeout_sec=float(args.request_timeout_sec),
                         response_mime_type="application/json",
                         response_schema=_schema_for_batch(chosen_n),
                     )

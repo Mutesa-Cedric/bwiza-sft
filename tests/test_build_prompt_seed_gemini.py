@@ -17,8 +17,8 @@ def test_task_lang_mode_mismatch_rejected() -> None:
     ok, reason = mod._validate_item(
         {
             "prompt": "Nkeneye inama ku kubitsa amafaranga mu muryango.",
-            "task_type": "language_control",
-            "lang_mode": "rw",
+            "task_type": "rw_instruction",
+            "lang_mode": "en",
         }
     )
     assert not ok

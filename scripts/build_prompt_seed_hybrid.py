@@ -70,8 +70,8 @@ ALLOWED_LANG_MODES = {
 TASK_LANG_MODE_COMPAT: dict[str, set[str]] = {
     "rw_instruction": {"rw"},
     "code_switch_instruction": {"rw_mixed"},
-    "multilingual_retention": {"en", "fr", "sw"},
-    "language_control": {"control"},
+    "multilingual_retention": {"en", "fr", "sw", "rw_mixed"},
+    "language_control": {"control", "rw", "rw_mixed", "en", "fr", "sw"},
     "followup_clarification": {"rw", "rw_mixed"},
     "safety_refusal": {"rw", "rw_mixed", "control"},
     "transformation": {"rw", "rw_mixed", "en", "fr", "sw"},
@@ -128,8 +128,9 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Gemini max output tokens. Set 0 to omit explicit cap.",
     )
-    p.add_argument("--max_retries", type=int, default=5)
-    p.add_argument("--retry_backoff_sec", type=float, default=1.5)
+    p.add_argument("--max_retries", type=int, default=8)
+    p.add_argument("--retry_backoff_sec", type=float, default=2.0)
+    p.add_argument("--request_timeout_sec", type=float, default=30.0)
     p.add_argument("--near_dup_threshold", type=float, default=0.9)
     p.add_argument("--near_dup_topic_limit", type=int, default=200)
     p.add_argument("--near_dup_global_limit", type=int, default=400)
@@ -542,6 +543,7 @@ def main() -> int:
         max_output_tokens=(int(args.max_output_tokens) if int(args.max_output_tokens) > 0 else None),
         max_retries=int(args.max_retries),
         retry_backoff_sec=float(args.retry_backoff_sec),
+        request_timeout_sec=float(args.request_timeout_sec),
     )
     org_cfg = OpenAIConfig(
         model=args.organizer_model,
@@ -631,7 +633,10 @@ def main() -> int:
                         local_failures.append(reason)
 
                 # Organizer pass for parse/validation failures or partial local rejects.
-                need_organizer = bool(parse_reason or local_failures)
+                # Organizer is a structural-repair fallback.
+                # When Flash already returned parseable JSON, local failures are usually
+                # dedup/topic/compat checks that organizer cannot reliably improve.
+                need_organizer = bool(parse_reason)
                 if need_organizer and ((int(state.get("accepted_local", 0)) + int(state.get("accepted_organized", 0))) < int(args.target)):
                     fail_summary = parse_reason or ",".join(sorted(set(local_failures))[:8])
                     org_text = chat_completion(

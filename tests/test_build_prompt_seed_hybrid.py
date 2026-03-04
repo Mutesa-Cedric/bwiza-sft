@@ -47,8 +47,8 @@ def test_validate_item_task_lang_mode_mismatch() -> None:
     ok, reason = mod._validate_item(
         {
             "prompt": "Sobanura uburezi bw'ibanze.",
-            "task_type": "language_control",
-            "lang_mode": "rw",
+            "task_type": "rw_instruction",
+            "lang_mode": "en",
         }
     )
     assert not ok
