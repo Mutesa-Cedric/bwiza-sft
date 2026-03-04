@@ -19,7 +19,7 @@ class GeminiConfig:
     base_url: str = "https://generativelanguage.googleapis.com"
     temperature: float = 0.4
     top_p: float = 0.95
-    max_output_tokens: int = 1024
+    max_output_tokens: int | None = None
     max_retries: int = 5
     retry_backoff_sec: float = 1.5
     response_mime_type: str = ""
@@ -72,9 +72,10 @@ def generate_text(cfg: GeminiConfig, user_prompt: str, system_prompt: str = "") 
         "generationConfig": {
             "temperature": cfg.temperature,
             "topP": cfg.top_p,
-            "maxOutputTokens": cfg.max_output_tokens,
         },
     }
+    if cfg.max_output_tokens is not None and int(cfg.max_output_tokens) > 0:
+        body["generationConfig"]["maxOutputTokens"] = int(cfg.max_output_tokens)
     if cfg.response_mime_type:
         body["generationConfig"]["responseMimeType"] = cfg.response_mime_type
     if cfg.response_schema is not None:

@@ -8,7 +8,7 @@ import re
 from collections import Counter
 
 
-_WORD_RE = re.compile(r"[\\w']+", re.UNICODE)
+_WORD_RE = re.compile(r"[\w']+", re.UNICODE)
 
 
 def _tokenize(text: str) -> set[str]:

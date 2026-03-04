@@ -121,6 +121,22 @@ python scripts/generate_sft_gemini.py \
   --max_items 100
 ```
 
+Hybrid prompt-seed pipeline (Flash generation + GPT organizer):
+
+```bash
+python scripts/build_prompt_seed_hybrid.py \
+  --output_prefix outputs/sft/prompts.seed.hybrid \
+  --target 30000
+```
+
+Main outputs:
+- `outputs/sft/prompts.seed.hybrid.final.jsonl`
+- `outputs/sft/prompts.seed.hybrid.accepted_local.jsonl`
+- `outputs/sft/prompts.seed.hybrid.accepted_organized.jsonl`
+- `outputs/sft/prompts.seed.hybrid.rejects.jsonl`
+- `outputs/sft/prompts.seed.hybrid.errors.jsonl`
+- `outputs/sft/prompts.seed.hybrid.state.json`
+
 TLS/SSL troubleshooting (macOS):
 
 ```bash

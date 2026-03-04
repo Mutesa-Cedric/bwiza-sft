@@ -75,6 +75,12 @@ DEFAULT_SYSTEM_PROMPT = (
     "Output STRICT JSON only."
 )
 
+REPAIR_SYSTEM_PROMPT = (
+    "You repair malformed JSON. "
+    "Return ONLY valid minified JSON. "
+    "No markdown, no explanation, no code fences."
+)
+
 PROMPT_SEED_RESPONSE_SCHEMA_BATCH: dict = {
     "type": "object",
     "properties": {
@@ -129,35 +135,58 @@ PROMPT_SEED_RESPONSE_SCHEMA_SINGLE: dict = {
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Build SFT prompt seed via Gemini")
-    p.add_argument("--output_jsonl", default="outputs/sft/prompts.seed.gemini.jsonl")
+    p.add_argument("--output_jsonl", default="outputs/sft/prompts.seed.flash.jsonl")
     p.add_argument("--errors_jsonl", default="")
     p.add_argument("--state_path", default="")
     p.add_argument(
         "--dedup_db",
-        default="",
+        default="outputs/sft/prompts.seed.shared.dedup.sqlite",
         help="Path to shared SQLite dedup DB. Reuse the same file across workers/reruns.",
     )
     p.add_argument("--topics_file", default="")
-    p.add_argument("--target", type=int, default=500)
-    p.add_argument("--batch_prompts", type=int, default=8)
+    p.add_argument("--target", type=int, default=30000)
+    p.add_argument("--batch_prompts", type=int, default=1)
     p.add_argument("--model", default="gemini-3-flash-preview")
+    p.add_argument(
+        "--parse_fallback_model",
+        default="",
+        help="Used only if primary model repeatedly returns unparseable JSON. Empty disables fallback.",
+    )
     p.add_argument("--api_key_env", default="GEMINI_API_KEY")
     p.add_argument("--env_file", default=".env")
-    p.add_argument("--temperature", type=float, default=0.2)
-    p.add_argument("--top_p", type=float, default=0.8)
-    p.add_argument("--max_output_tokens", type=int, default=512)
+    p.add_argument("--temperature", type=float, default=0.0)
+    p.add_argument("--top_p", type=float, default=0.1)
+    p.add_argument("--max_output_tokens", type=int, default=0)
     p.add_argument("--max_retries", type=int, default=5)
     p.add_argument("--retry_backoff_sec", type=float, default=1.5)
-    p.add_argument("--parse_retries", type=int, default=4)
-    p.add_argument("--candidate_pool", type=int, default=3)
-    p.add_argument("--avoid_topic_recent", type=int, default=16)
-    p.add_argument("--avoid_global_recent", type=int, default=12)
-    p.add_argument("--avoid_pattern_topk", type=int, default=10)
+    p.add_argument("--parse_retries", type=int, default=3)
+    p.add_argument("--candidate_pool", type=int, default=1)
+    p.add_argument("--avoid_topic_recent", type=int, default=8)
+    p.add_argument("--avoid_global_recent", type=int, default=8)
+    p.add_argument("--avoid_pattern_topk", type=int, default=5)
     p.add_argument("--near_dup_threshold", type=float, default=0.9)
     p.add_argument("--near_dup_topic_limit", type=int, default=200)
     p.add_argument("--near_dup_global_limit", type=int, default=400)
     p.add_argument("--sleep_sec", type=float, default=0.2)
     p.add_argument("--print_every", type=int, default=10)
+    p.add_argument(
+        "--cb_consecutive_429",
+        type=int,
+        default=12,
+        help="Stop run after this many consecutive quota/rate-limit failures.",
+    )
+    p.add_argument(
+        "--cb_consecutive_parse",
+        type=int,
+        default=12,
+        help="Stop run after this many consecutive parse/shape failures.",
+    )
+    p.add_argument(
+        "--cb_consecutive_fail",
+        type=int,
+        default=30,
+        help="Stop run after this many consecutive total failures.",
+    )
     return p.parse_args()
 
 
@@ -273,6 +302,9 @@ def _extract_json_block(text: str) -> dict:
     start = s.find("{")
     end = s.rfind("}")
     if start < 0 or end < 0 or end <= start:
+        partial = _extract_partial_item(s)
+        if partial is not None:
+            return partial
         raise ValueError("no_json_object_found")
     block = s[start : end + 1]
 
@@ -283,43 +315,110 @@ def _extract_json_block(text: str) -> dict:
     except json.JSONDecodeError:
         # Common LLM glitch: trailing commas before closing braces/brackets.
         repaired = re.sub(r",(\s*[}\]])", r"\1", block)
-        obj = json.loads(repaired)
-        if isinstance(obj, dict):
-            return obj
+        try:
+            obj = json.loads(repaired)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            # Try lightweight close-brace repairs for truncated endings.
+            for suffix in ("}", "]}", "}]}"):
+                try:
+                    obj = json.loads((repaired + suffix))
+                    if isinstance(obj, dict):
+                        return obj
+                except json.JSONDecodeError:
+                    continue
+
+    partial = _extract_partial_item(s)
+    if partial is not None:
+        return partial
 
     raise ValueError("json_object_not_dict")
+
+
+def _decode_json_string_fragment(raw: str) -> str:
+    # raw is expected without surrounding quotes.
+    try:
+        return normalize_text(json.loads(f"\"{raw}\""))
+    except Exception:
+        return normalize_text(raw.replace("\\n", " ").replace('\\"', '"'))
+
+
+def _extract_partial_item(text: str) -> dict | None:
+    # Salvage path for truncated outputs such as:
+    # {"prompt":"...","task_type":"rw_instruction","lang_mode":"rw"
+    prompt_m = re.search(r'"prompt"\s*:\s*"((?:\\.|[^"\\])*)"', text)
+    task_m = re.search(
+        r'"task_type"\s*:\s*"(rw_instruction|code_switch_instruction|multilingual_retention|language_control)"',
+        text,
+    )
+    lang_m = re.search(r'"lang_mode"\s*:\s*"(rw|rw_mixed|en|fr|sw|control)"', text)
+    if not (prompt_m and task_m and lang_m):
+        return None
+    prompt = _decode_json_string_fragment(prompt_m.group(1))
+    if not prompt:
+        return None
+    return {
+        "prompt": prompt,
+        "task_type": task_m.group(1),
+        "lang_mode": lang_m.group(1),
+    }
+
+
+def _build_repair_prompt(broken_text: str, n: int) -> str:
+    if n <= 1:
+        schema = (
+            '{"prompt":"<string>","task_type":"rw_instruction|code_switch_instruction|multilingual_retention|language_control",'
+            '"lang_mode":"rw|rw_mixed|en|fr|sw|control"}'
+        )
+    else:
+        schema = (
+            '{"items":[{"prompt":"<string>","task_type":"rw_instruction|code_switch_instruction|multilingual_retention|language_control",'
+            '"lang_mode":"rw|rw_mixed|en|fr|sw|control"}]}'
+        )
+    return (
+        "Repair this into valid JSON only. "
+        "Do not change intent. "
+        "Output must exactly match schema form.\n"
+        f"Schema: {schema}\n"
+        "Broken output:\n"
+        f"{broken_text}"
+    )
 
 
 def _build_user_prompt(topic: str, n: int, avoid_prompts: list[str], frequent_patterns: list[str]) -> str:
     avoid_block = ""
     if avoid_prompts:
-        avoid_block += "Avoid prompts that are same/very similar to these examples:\\n"
+        avoid_block += "Avoid same/very similar prompts as:\\n"
         avoid_block += "\\n".join([f"- {p}" for p in avoid_prompts]) + "\\n"
     if frequent_patterns:
-        avoid_block += "Avoid overusing these common prompt openings:\\n"
+        avoid_block += "Avoid these common openings:\\n"
         avoid_block += "\\n".join([f"- {p}" for p in frequent_patterns]) + "\\n"
 
     if n <= 1:
         return (
-            "Generate one SFT prompt seed item.\\n"
-            "Topic: "
-            + topic
-            + "\\n"
-            "Output one JSON object with exact schema:\\n"
-            "{\"prompt\":\"...\",\"task_type\":\"rw_instruction|code_switch_instruction|multilingual_retention|language_control\",\"lang_mode\":\"rw|rw_mixed|en|fr|sw|control\"}\\n"
-            "Constraints:\\n"
+            "Generate exactly ONE user prompt for SFT.\\n"
+            f"Topic: {topic}\\n"
+            "Return ONLY one minified JSON object.\\n"
+            "No markdown. No code fences. No prose.\\n"
+            "JSON must end with '}'.\\n"
+            "Schema exactly:\\n"
+            "{\"prompt\":\"<string>\",\"task_type\":\"rw_instruction|code_switch_instruction|multilingual_retention|language_control\",\"lang_mode\":\"rw|rw_mixed|en|fr|sw|control\"}\\n"
+            "Rules:\\n"
             + avoid_block
             + "- Prompt must be realistic and <= 220 chars.\\n"
             "- Do not include answers.\\n"
-            "- Return JSON only."
+            "- Output JSON only."
         )
     return (
-        "Generate prompt seed items for SFT.\\n"
-        "Topic: " + topic + "\\n"
+        "Generate SFT prompt seed items.\\n"
+        f"Topic: {topic}\\n"
         f"Need exactly {n} items.\\n"
-        "Output JSON object with this exact schema:\\n"
+        "Return ONLY one minified JSON object.\\n"
+        "No markdown. No code fences. No prose.\\n"
+        "Schema exactly:\\n"
         "{\"items\":[{\"prompt\":\"...\",\"task_type\":\"rw_instruction|code_switch_instruction|multilingual_retention|language_control\",\"lang_mode\":\"rw|rw_mixed|en|fr|sw|control\"}]}\\n"
-        "Constraints:\\n"
+        "Rules:\\n"
         + avoid_block
         + "- At least 50% items with lang_mode=rw.\\n"
         "- Include at least 1 code_switch item.\\n"
@@ -327,7 +426,7 @@ def _build_user_prompt(topic: str, n: int, avoid_prompts: list[str], frequent_pa
         "- Prompts must be realistic user requests.\\n"
         "- Keep each prompt <= 220 chars.\\n"
         "- Do not include answers, only prompts.\\n"
-        "- Return JSON only."
+        "- Output JSON only."
     )
 
 def _schema_for_batch(n: int) -> dict:
@@ -384,6 +483,36 @@ def _validate_item(item: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _classify_failure(err: str) -> tuple[bool, bool]:
+    e = normalize_text(err).lower()
+    is_429 = "http_429" in e
+    is_parse = (
+        "invalid_json_output" in e
+        or "items_not_list" in e
+        or "invalid_payload_not_object" in e
+        or "json_object_not_dict" in e
+    )
+    return is_429, is_parse
+
+
+def _circuit_break_reason(
+    *,
+    consecutive_429: int,
+    consecutive_parse: int,
+    consecutive_fail: int,
+    max_consecutive_429: int,
+    max_consecutive_parse: int,
+    max_consecutive_fail: int,
+) -> str:
+    if max_consecutive_429 > 0 and consecutive_429 >= max_consecutive_429:
+        return "consecutive_429_limit_reached"
+    if max_consecutive_parse > 0 and consecutive_parse >= max_consecutive_parse:
+        return "consecutive_parse_limit_reached"
+    if max_consecutive_fail > 0 and consecutive_fail >= max_consecutive_fail:
+        return "consecutive_fail_limit_reached"
+    return ""
+
+
 def main() -> int:
     args = parse_args()
 
@@ -408,6 +537,9 @@ def main() -> int:
     source_name = output_path.name
 
     with PromptDedupIndex(dedup_db_path) as dedup:
+        consecutive_429 = 0
+        consecutive_parse = 0
+        consecutive_fail = 0
         # One-time bootstrap for existing output file if DB is new/empty.
         if dedup.count() == 0 and seen_prompts:
             ts = datetime.now(timezone.utc).isoformat()
@@ -436,32 +568,56 @@ def main() -> int:
                 avoid_prompts=avoid_prompts,
                 frequent_patterns=frequent_patterns,
             )
-            cfg = GeminiConfig(
-                model=args.model,
-                api_key=api_key,
-                temperature=float(args.temperature),
-                top_p=float(args.top_p),
-                max_output_tokens=int(args.max_output_tokens),
-                max_retries=int(args.max_retries),
-                retry_backoff_sec=float(args.retry_backoff_sec),
-                response_mime_type="application/json",
-                response_schema=_schema_for_batch(chosen_n),
-            )
-
             try:
-                payload: dict | None = None
-                last_parse_error = ""
-                for parse_try in range(1, int(args.parse_retries) + 1):
-                    text = generate_text(cfg, user_prompt=user_prompt, system_prompt=DEFAULT_SYSTEM_PROMPT)
-                    try:
-                        payload = _extract_json_block(text)
-                        break
-                    except (ValueError, json.JSONDecodeError) as parse_err:
-                        last_parse_error = f"invalid_json_output:{parse_err}; head={text[:320]!r}"
-                        if parse_try < int(args.parse_retries):
-                            time.sleep(float(args.retry_backoff_sec) * parse_try)
-                            continue
-                        raise ValueError(last_parse_error) from parse_err
+                used_model = args.model
+
+                def _request_payload(model_name: str) -> dict:
+                    cfg = GeminiConfig(
+                        model=model_name,
+                        api_key=api_key,
+                        temperature=float(args.temperature),
+                        top_p=float(args.top_p),
+                        max_output_tokens=(int(args.max_output_tokens) if int(args.max_output_tokens) > 0 else None),
+                        max_retries=int(args.max_retries),
+                        retry_backoff_sec=float(args.retry_backoff_sec),
+                        response_mime_type="application/json",
+                        response_schema=_schema_for_batch(chosen_n),
+                    )
+                    last_parse_error = ""
+                    for parse_try in range(1, int(args.parse_retries) + 1):
+                        text = generate_text(cfg, user_prompt=user_prompt, system_prompt=DEFAULT_SYSTEM_PROMPT)
+                        try:
+                            return _extract_json_block(text)
+                        except (ValueError, json.JSONDecodeError) as parse_err:
+                            last_parse_error = f"invalid_json_output:{parse_err}; model={model_name}; head={text[:320]!r}"
+                            # Repair pass: ask model to normalize malformed output into exact JSON.
+                            try:
+                                repair_prompt = _build_repair_prompt(text, chosen_n)
+                                repaired_text = generate_text(
+                                    cfg,
+                                    user_prompt=repair_prompt,
+                                    system_prompt=REPAIR_SYSTEM_PROMPT,
+                                )
+                                return _extract_json_block(repaired_text)
+                            except (GeminiError, ValueError, json.JSONDecodeError) as repair_err:
+                                last_parse_error = (
+                                    f"{last_parse_error}; repair_failed:{repair_err}; repair_head={str(repaired_text if 'repaired_text' in locals() else '')[:320]!r}"
+                                )
+                            if parse_try < int(args.parse_retries):
+                                time.sleep(float(args.retry_backoff_sec) * parse_try)
+                                continue
+                            raise ValueError(last_parse_error) from parse_err
+                    raise ValueError(last_parse_error or f"invalid_json_output: model={model_name}")
+
+                try:
+                    payload = _request_payload(args.model)
+                except ValueError as primary_parse_err:
+                    fallback_model = normalize_text(args.parse_fallback_model)
+                    if fallback_model and fallback_model != args.model:
+                        payload = _request_payload(fallback_model)
+                        used_model = fallback_model
+                    else:
+                        raise primary_parse_err
 
                 if not isinstance(payload, dict):
                     raise ValueError("invalid_payload_not_object")
@@ -533,7 +689,7 @@ def main() -> int:
                         "lang_mode": item.get("lang_mode"),
                         "topic": topic,
                         "source": "gemini_prompt_seed_v1",
-                        "teacher_model": cfg.model,
+                        "teacher_model": used_model,
                         "created_at": datetime.now(timezone.utc).isoformat(),
                     }
                     append_jsonl(output_path, rec)
@@ -541,9 +697,16 @@ def main() -> int:
                     accepted_in_call += 1
 
                 state["generated"] = int(state.get("generated", 0)) + len(items)
+                consecutive_429 = 0
+                consecutive_parse = 0
+                consecutive_fail = 0
 
             except (GeminiError, ValueError, json.JSONDecodeError) as e:
                 state["failed_calls"] = int(state.get("failed_calls", 0)) + 1
+                is_429, is_parse = _classify_failure(str(e))
+                consecutive_429 = consecutive_429 + 1 if is_429 else 0
+                consecutive_parse = consecutive_parse + 1 if is_parse else 0
+                consecutive_fail += 1
                 append_jsonl(
                     errors_path,
                     {
@@ -560,8 +723,38 @@ def main() -> int:
 
             if topic_index % max(1, int(args.print_every)) == 0:
                 print(
-                    f"accepted={state['accepted']} generated={state['generated']} rejected={state['rejected_prompts']} failed_calls={state['failed_calls']} topic_index={state['topic_index']} dedup_entries={state['dedup_db_entries']}"
+                    "accepted="
+                    f"{state['accepted']} generated={state['generated']} "
+                    f"rejected={state['rejected_prompts']} failed_calls={state['failed_calls']} "
+                    f"topic_index={state['topic_index']} dedup_entries={state['dedup_db_entries']} "
+                    f"cb429={consecutive_429} cbparse={consecutive_parse} cbfail={consecutive_fail}"
                 )
+
+            cb_reason = _circuit_break_reason(
+                consecutive_429=consecutive_429,
+                consecutive_parse=consecutive_parse,
+                consecutive_fail=consecutive_fail,
+                max_consecutive_429=int(args.cb_consecutive_429),
+                max_consecutive_parse=int(args.cb_consecutive_parse),
+                max_consecutive_fail=int(args.cb_consecutive_fail),
+            )
+            if cb_reason:
+                append_jsonl(
+                    errors_path,
+                    {
+                        "reason": "circuit_breaker_stop",
+                        "circuit_reason": cb_reason,
+                        "accepted": state["accepted"],
+                        "generated": state["generated"],
+                        "failed_calls": state["failed_calls"],
+                        "topic_index": state["topic_index"],
+                        "consecutive_429": consecutive_429,
+                        "consecutive_parse": consecutive_parse,
+                        "consecutive_fail": consecutive_fail,
+                    },
+                )
+                print(f"circuit_breaker_stop: {cb_reason}")
+                break
 
             if args.sleep_sec > 0:
                 time.sleep(float(args.sleep_sec))
