@@ -89,3 +89,35 @@ def test_collect_avoid_memory_merges_unique_and_patterns() -> None:
     )
     assert avoid == ["Prompt A", "Prompt B", "Prompt C"]
     assert patterns == ["Sobanura ...", "Ni gute ..."]
+
+
+def test_load_state_uses_topic_index_start_when_missing(tmp_path: Path) -> None:
+    mod = _load_module()
+    state = mod._load_state(tmp_path / "missing.state.json", topic_index_start=7)
+    assert state["topic_index"] == 7
+
+
+def test_compute_post_iteration_sleep_adds_failure_cooldown() -> None:
+    mod = _load_module()
+    sleep_for = mod._compute_post_iteration_sleep(
+        base_sleep_sec=0.0,
+        sleep_jitter_sec=0.0,
+        had_api_failure=True,
+        consecutive_fail=3,
+        failure_cooldown_sec=2.0,
+        failure_cooldown_cap_sec=20.0,
+    )
+    assert sleep_for == 6.0
+
+
+def test_compute_post_iteration_sleep_caps_failure_cooldown() -> None:
+    mod = _load_module()
+    sleep_for = mod._compute_post_iteration_sleep(
+        base_sleep_sec=0.0,
+        sleep_jitter_sec=0.0,
+        had_api_failure=True,
+        consecutive_fail=10,
+        failure_cooldown_sec=4.0,
+        failure_cooldown_cap_sec=12.0,
+    )
+    assert sleep_for == 12.0

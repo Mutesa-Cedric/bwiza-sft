@@ -5,7 +5,14 @@ from __future__ import annotations
 from hashlib import sha1
 from pathlib import Path
 from typing import Any, Iterator
+import contextlib
 import json
+import os
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
 
 
 def normalize_text(value: Any) -> str:
@@ -77,7 +84,14 @@ def append_jsonl(path: str | Path, obj: dict[str, Any]) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a", encoding="utf-8") as f:
+        if fcntl is not None:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         f.write(json.dumps(obj, ensure_ascii=True) + "\n")
+        f.flush()
+        with contextlib.suppress(OSError):
+            os.fsync(f.fileno())
+        if fcntl is not None:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def split_bucket(key: str, train_ratio: float, val_ratio: float) -> str:

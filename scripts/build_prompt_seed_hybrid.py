@@ -9,6 +9,7 @@ from hashlib import sha1
 import json
 import os
 from pathlib import Path
+import random
 import re
 import sys
 import time
@@ -111,16 +112,30 @@ ORGANIZER_SYSTEM_PROMPT = (
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Hybrid prompt seed pipeline (Flash + organizer)")
     p.add_argument("--output_prefix", default="outputs/sft/prompts.seed.hybrid")
+    p.add_argument(
+        "--shared_output_prefix",
+        default="",
+        help="Optional shared prefix for canonical JSONL outputs. State remains under output_prefix.",
+    )
     p.add_argument("--topics_file", default="")
     p.add_argument("--target", type=int, default=30000)
+    p.add_argument("--topic_index_start", type=int, default=0)
     p.add_argument("--flash_batch_size", type=int, default=4)
     p.add_argument("--gemini_model", default="gemini-3-flash-preview")
     p.add_argument("--organizer_model", default="gpt-5.2")
+    p.add_argument(
+        "--disable_organizer",
+        action="store_true",
+        help="Disable organizer repair pass and skip OpenAI requirements.",
+    )
     p.add_argument("--env_file", default=".env")
     p.add_argument("--gemini_api_key_env", default="GEMINI_API_KEY")
     p.add_argument("--openai_api_key_env", default="OPENAI_API_KEY")
     p.add_argument("--dedup_db", default="outputs/sft/prompts.seed.shared.dedup.sqlite")
     p.add_argument("--sleep_sec", type=float, default=0.2)
+    p.add_argument("--sleep_jitter_sec", type=float, default=0.5)
+    p.add_argument("--failure_cooldown_sec", type=float, default=4.0)
+    p.add_argument("--failure_cooldown_cap_sec", type=float, default=20.0)
     p.add_argument("--print_every", type=int, default=10)
     p.add_argument(
         "--max_output_tokens",
@@ -418,14 +433,35 @@ def _circuit_break_reason(
     return ""
 
 
-def _load_state(path: Path) -> dict[str, Any]:
+def _compute_post_iteration_sleep(
+    *,
+    base_sleep_sec: float,
+    sleep_jitter_sec: float,
+    had_api_failure: bool,
+    consecutive_fail: int,
+    failure_cooldown_sec: float,
+    failure_cooldown_cap_sec: float,
+) -> float:
+    sleep_for = max(0.0, float(base_sleep_sec))
+    if sleep_jitter_sec > 0:
+        sleep_for += random.uniform(0.0, float(sleep_jitter_sec))
+    if had_api_failure and consecutive_fail > 0 and failure_cooldown_sec > 0:
+        extra = min(
+            float(failure_cooldown_cap_sec),
+            float(failure_cooldown_sec) * max(1, int(consecutive_fail)),
+        )
+        sleep_for += extra
+    return sleep_for
+
+
+def _load_state(path: Path, topic_index_start: int = 0) -> dict[str, Any]:
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             pass
     return {
-        "topic_index": 0,
+        "topic_index": max(0, int(topic_index_start)),
         "flash_calls": 0,
         "organizer_calls": 0,
         "accepted_local": 0,
@@ -516,23 +552,26 @@ def main() -> int:
         raise RuntimeError(
             f"Missing Gemini key in env var: {args.gemini_api_key_env} (checked env file: {args.env_file})"
         )
-    openai_key = os.environ.get(args.openai_api_key_env, "").strip()
-    if not openai_key:
-        raise RuntimeError(
-            f"Missing OpenAI key in env var: {args.openai_api_key_env} (checked env file: {args.env_file})"
-        )
+    openai_key = ""
+    if not args.disable_organizer:
+        openai_key = os.environ.get(args.openai_api_key_env, "").strip()
+        if not openai_key:
+            raise RuntimeError(
+                f"Missing OpenAI key in env var: {args.openai_api_key_env} (checked env file: {args.env_file})"
+            )
 
     out_prefix = Path(args.output_prefix)
-    final_path = _out_path(out_prefix, "final.jsonl")
-    local_path = _out_path(out_prefix, "accepted_local.jsonl")
-    organized_path = _out_path(out_prefix, "accepted_organized.jsonl")
-    rejects_path = _out_path(out_prefix, "rejects.jsonl")
-    errors_path = _out_path(out_prefix, "errors.jsonl")
-    raw_path = _out_path(out_prefix, "raw.jsonl")
+    shared_prefix = Path(args.shared_output_prefix) if args.shared_output_prefix else out_prefix
+    final_path = _out_path(shared_prefix, "final.jsonl")
+    local_path = _out_path(shared_prefix, "accepted_local.jsonl")
+    organized_path = _out_path(shared_prefix, "accepted_organized.jsonl")
+    rejects_path = _out_path(shared_prefix, "rejects.jsonl")
+    errors_path = _out_path(shared_prefix, "errors.jsonl")
+    raw_path = _out_path(shared_prefix, "raw.jsonl")
     state_path = _out_path(out_prefix, "state.json")
 
     topics = _load_topics(args.topics_file)
-    state = _load_state(state_path)
+    state = _load_state(state_path, topic_index_start=int(args.topic_index_start))
     topic_index = int(state.get("topic_index", 0))
 
     flash_cfg = GeminiConfig(
@@ -545,14 +584,16 @@ def main() -> int:
         retry_backoff_sec=float(args.retry_backoff_sec),
         request_timeout_sec=float(args.request_timeout_sec),
     )
-    org_cfg = OpenAIConfig(
-        model=args.organizer_model,
-        api_key=openai_key,
-        temperature=0.0,
-        max_output_tokens=300,
-        max_retries=int(args.max_retries),
-        retry_backoff_sec=float(args.retry_backoff_sec),
-    )
+    org_cfg = None
+    if not args.disable_organizer:
+        org_cfg = OpenAIConfig(
+            model=args.organizer_model,
+            api_key=openai_key,
+            temperature=0.0,
+            max_output_tokens=300,
+            max_retries=int(args.max_retries),
+            retry_backoff_sec=float(args.retry_backoff_sec),
+        )
 
     consecutive_429 = 0
     consecutive_parse = 0
@@ -560,6 +601,7 @@ def main() -> int:
 
     with PromptDedupIndex(Path(args.dedup_db)) as dedup:
         while (int(state.get("accepted_local", 0)) + int(state.get("accepted_organized", 0))) < int(args.target):
+            had_api_failure = False
             topic = topics[topic_index % len(topics)]
             required_task_type = TASK_TYPE_CYCLE[topic_index % len(TASK_TYPE_CYCLE)]
             accepted_before = int(state.get("accepted_local", 0)) + int(state.get("accepted_organized", 0))
@@ -636,7 +678,7 @@ def main() -> int:
                 # Organizer is a structural-repair fallback.
                 # When Flash already returned parseable JSON, local failures are usually
                 # dedup/topic/compat checks that organizer cannot reliably improve.
-                need_organizer = bool(parse_reason)
+                need_organizer = bool(parse_reason) and not args.disable_organizer
                 if need_organizer and ((int(state.get("accepted_local", 0)) + int(state.get("accepted_organized", 0))) < int(args.target)):
                     fail_summary = parse_reason or ",".join(sorted(set(local_failures))[:8])
                     org_text = chat_completion(
@@ -707,6 +749,7 @@ def main() -> int:
                                 )
 
             except (GeminiError, OpenAIError, ValueError, json.JSONDecodeError) as e:
+                had_api_failure = True
                 state["failed_calls"] = int(state.get("failed_calls", 0)) + 1
                 is_429, is_parse = _classify_failure(str(e))
                 consecutive_429 = consecutive_429 + 1 if is_429 else 0
@@ -765,8 +808,16 @@ def main() -> int:
                 print(f"circuit_breaker_stop: {cb_reason}")
                 break
 
-            if args.sleep_sec > 0:
-                time.sleep(float(args.sleep_sec))
+            sleep_for = _compute_post_iteration_sleep(
+                base_sleep_sec=float(args.sleep_sec),
+                sleep_jitter_sec=float(args.sleep_jitter_sec),
+                had_api_failure=had_api_failure,
+                consecutive_fail=consecutive_fail,
+                failure_cooldown_sec=float(args.failure_cooldown_sec),
+                failure_cooldown_cap_sec=float(args.failure_cooldown_cap_sec),
+            )
+            if sleep_for > 0:
+                time.sleep(sleep_for)
 
     _save_state(state_path, state)
     print(json.dumps(state, indent=2))
