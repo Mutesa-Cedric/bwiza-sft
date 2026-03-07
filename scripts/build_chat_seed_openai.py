@@ -123,8 +123,14 @@ _ZERO_WIDTH_RE = re.compile(r"[\u200B\u200C\u200D\uFEFF]")
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Build multi-turn chat seed via OpenAI")
     p.add_argument("--output_prefix", default="outputs/sft/chat.seed.openai")
+    p.add_argument(
+        "--shared_output_prefix",
+        default="",
+        help="Optional shared prefix for canonical JSONL outputs. State remains under output_prefix.",
+    )
     p.add_argument("--topics_file", default="")
     p.add_argument("--target_dialogues", type=int, default=5000)
+    p.add_argument("--topic_index_start", type=int, default=0)
     p.add_argument("--model", default="gpt-5.4")
     p.add_argument("--api_key_env", default="OPENAI_API_KEY")
     p.add_argument("--env_file", default=".env")
@@ -514,14 +520,17 @@ def main() -> int:
         )
 
     out_prefix = Path(args.output_prefix)
-    dialogues_path = _out_path(out_prefix, "dialogues.jsonl")
-    pairs_path = _out_path(out_prefix, "pairs.jsonl")
-    rejects_path = _out_path(out_prefix, "rejects.jsonl")
-    errors_path = _out_path(out_prefix, "errors.jsonl")
+    shared_prefix = Path(args.shared_output_prefix) if args.shared_output_prefix else out_prefix
+    dialogues_path = _out_path(shared_prefix, "dialogues.jsonl")
+    pairs_path = _out_path(shared_prefix, "pairs.jsonl")
+    rejects_path = _out_path(shared_prefix, "rejects.jsonl")
+    errors_path = _out_path(shared_prefix, "errors.jsonl")
     state_path = _out_path(out_prefix, "state.json")
 
     topics = _load_topics(args.topics_file)
     state = _load_state(state_path)
+    if not state_path.exists():
+        state["topic_index"] = max(0, int(args.topic_index_start))
     rng = random.Random(int(args.seed))
     emitted_topic_counts: dict[str, int] = {}
     emitted_style_counts: dict[str, int] = {}
