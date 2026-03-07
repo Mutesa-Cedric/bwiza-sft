@@ -81,7 +81,8 @@ FIXED_USER_PREFIX = "\n".join(
         "Messages must alternate user then assistant.",
         "Conversation must start with user and end with assistant.",
         "Keep the chat realistic, grounded, and natural for Rwanda context.",
-        "Avoid robotic repetition and avoid textbook phrasing unless the topic needs it.",
+        "Keep replies concise; avoid unnecessarily long assistant messages.",
+        "Avoid robotic repetition and textbook phrasing unless the topic needs it.",
         "Allow occasional code-switching only when natural for the chosen style.",
     ]
 )
@@ -128,8 +129,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--api_key_env", default="OPENAI_API_KEY")
     p.add_argument("--env_file", default=".env")
     p.add_argument("--dedup_db", default="outputs/sft/chat.seed.shared.dedup.sqlite")
-    p.add_argument("--min_turns", type=int, default=3)
-    p.add_argument("--max_turns", type=int, default=6)
+    p.add_argument("--min_turns", type=int, default=2)
+    p.add_argument("--max_turns", type=int, default=4)
     p.add_argument("--history_window_messages", type=int, default=8)
     p.add_argument("--temperature", type=float, default=0.2)
     p.add_argument("--max_output_tokens", type=int, default=0)
@@ -367,10 +368,10 @@ def _build_user_prompt(
     ]
     if avoid_prompts:
         lines.append("Avoid conversations too similar to these recent starters:")
-        lines.extend([f"- {p}" for p in avoid_prompts[:12]])
+        lines.extend([f"- {p}" for p in avoid_prompts[:6]])
     if frequent_patterns:
         lines.append("Avoid overusing these openings:")
-        lines.extend([f"- {p}" for p in frequent_patterns[:8]])
+        lines.extend([f"- {p}" for p in frequent_patterns[:4]])
     return "\n".join(lines)
 
 
@@ -529,7 +530,7 @@ def main() -> int:
         model=args.model,
         api_key=api_key,
         temperature=float(args.temperature),
-        max_output_tokens=(int(args.max_output_tokens) if int(args.max_output_tokens) > 0 else 800),
+        max_output_tokens=(int(args.max_output_tokens) if int(args.max_output_tokens) > 0 else 2500),
         max_retries=int(args.max_retries),
         retry_backoff_sec=float(args.retry_backoff_sec),
         request_timeout_sec=float(args.request_timeout_sec),
