@@ -8,11 +8,45 @@ from typing import Any, Iterator
 import contextlib
 import json
 import os
+import re
 
 try:
     import fcntl
 except ImportError:  # pragma: no cover
     fcntl = None
+
+
+SMART_PUNCT_MAP = str.maketrans(
+    {
+        "’": "'",
+        "‘": "'",
+        "“": '"',
+        "”": '"',
+        "«": '"',
+        "»": '"',
+        "‹": "'",
+        "›": "'",
+        "–": "-",
+        "—": "-",
+        "‑": "-",
+        "‒": "-",
+        "−": "-",
+        "…": "...",
+        "∕": "/",
+        "⁄": "/",
+        "：": ":",
+        "，": ",",
+        "；": ";",
+        "（": "(",
+        "）": ")",
+        "？": "?",
+        "！": "!",
+        "\u00A0": " ",
+        "\u2007": " ",
+        "\u202F": " ",
+    }
+)
+_ZERO_WIDTH_RE = re.compile(r"[\u200B\u200C\u200D\uFEFF]")
 
 
 def normalize_text(value: Any) -> str:
@@ -23,19 +57,27 @@ def normalize_text(value: Any) -> str:
     return " ".join(value.strip().split())
 
 
+def normalize_ascii_text(value: Any) -> str:
+    text = normalize_text(value)
+    if not text:
+        return ""
+    text = _ZERO_WIDTH_RE.sub("", text)
+    return normalize_text(text.translate(SMART_PUNCT_MAP))
+
+
 def extract_prompt(record: dict[str, Any]) -> str:
     if "prompt" in record:
-        return normalize_text(record.get("prompt"))
+        return normalize_ascii_text(record.get("prompt"))
     if "question" in record:
-        return normalize_text(record.get("question"))
+        return normalize_ascii_text(record.get("question"))
     if "instruction" in record and "output" in record:
-        ins = normalize_text(record.get("instruction"))
-        inp = normalize_text(record.get("input"))
+        ins = normalize_ascii_text(record.get("instruction"))
+        inp = normalize_ascii_text(record.get("input"))
         return ins if not inp else f"{ins}\n{inp}"
     if "messages" in record and isinstance(record.get("messages"), list):
         for m in record["messages"]:
             if isinstance(m, dict) and normalize_text(m.get("role")).lower() == "user":
-                prompt = normalize_text(m.get("content"))
+                prompt = normalize_ascii_text(m.get("content"))
                 if prompt:
                     return prompt
     return ""
@@ -43,15 +85,15 @@ def extract_prompt(record: dict[str, Any]) -> str:
 
 def extract_response(record: dict[str, Any]) -> str:
     if "response" in record:
-        return normalize_text(record.get("response"))
+        return normalize_ascii_text(record.get("response"))
     if "answer" in record:
-        return normalize_text(record.get("answer"))
+        return normalize_ascii_text(record.get("answer"))
     if "output" in record:
-        return normalize_text(record.get("output"))
+        return normalize_ascii_text(record.get("output"))
     if "messages" in record and isinstance(record.get("messages"), list):
         for m in record["messages"]:
             if isinstance(m, dict) and normalize_text(m.get("role")).lower() == "assistant":
-                resp = normalize_text(m.get("content"))
+                resp = normalize_ascii_text(m.get("content"))
                 if resp:
                     return resp
     return ""
