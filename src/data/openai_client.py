@@ -41,13 +41,45 @@ def _ssl_context() -> ssl.SSLContext:
 
 
 def _extract_text(payload: dict[str, Any]) -> str:
+    output_text = payload.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    def _coerce_content(content: Any) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    s = item.strip()
+                    if s:
+                        chunks.append(s)
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                text_value = item.get("text")
+                if isinstance(text_value, str) and text_value.strip():
+                    chunks.append(text_value.strip())
+                    continue
+                # Support nested shapes like {"type":"output_text","text":"..."}
+                if isinstance(item.get("type"), str):
+                    nested = item.get("content")
+                    if isinstance(nested, str) and nested.strip():
+                        chunks.append(nested.strip())
+            return "\n".join(chunks).strip()
+        return ""
+
     choices = payload.get("choices") or []
     if not choices:
         return ""
     msg = choices[0].get("message") or {}
-    content = msg.get("content")
-    if isinstance(content, str):
-        return content.strip()
+    text = _coerce_content(msg.get("content"))
+    if text:
+        return text
+    text = _coerce_content(choices[0].get("text"))
+    if text:
+        return text
     return ""
 
 
@@ -86,7 +118,7 @@ def chat_completion(
                 payload = json.loads(resp.read().decode("utf-8"))
                 text = _extract_text(payload)
                 if not text:
-                    raise OpenAIError("empty_completion_text")
+                    raise OpenAIError(f"empty_completion_text:{json.dumps(payload, ensure_ascii=True)[:800]}")
                 return text
         except error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace")
