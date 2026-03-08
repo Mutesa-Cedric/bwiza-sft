@@ -1,4 +1,5 @@
 from importlib.util import module_from_spec, spec_from_file_location
+import json
 from pathlib import Path
 
 
@@ -56,6 +57,19 @@ def test_extract_batch_items_reads_json_items() -> None:
         "a1": "Muraho neza.",
         "a2": "Diyabete ni indwara...",
     }
+
+
+def test_load_existing_answer_ids_reads_only_answered_rows(tmp_path: Path) -> None:
+    mod = _load_module()
+    path = tmp_path / "answers.jsonl"
+    rows = [
+        {"id": "a1", "response": "Muraho neza."},
+        {"id": "a2", "response": ""},
+        {"id": "", "response": "Igisubizo"},
+        {"id": "a3", "response": "Wi‑Fi y'u rugo"},
+    ]
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    assert mod._load_existing_answer_ids(path) == {"a1", "a3"}
 
 
 def test_classify_failure_maps_known_cases() -> None:

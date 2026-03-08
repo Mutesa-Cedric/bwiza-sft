@@ -116,6 +116,7 @@ def _load_state(path: Path) -> dict:
         "processed": 0,
         "succeeded": 0,
         "failed": 0,
+        "skipped_existing": 0,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "updated_at": "",
     }
@@ -196,6 +197,18 @@ def _classify_failure(err: str) -> str:
     return "openai_error"
 
 
+def _load_existing_answer_ids(path: Path) -> set[str]:
+    ids: set[str] = set()
+    if not path.exists():
+        return ids
+    for _, obj in iter_jsonl(path):
+        rid = normalize_ascii_text(obj.get("id", ""))
+        response = normalize_ascii_text(obj.get("response", ""))
+        if rid and response:
+            ids.add(rid)
+    return ids
+
+
 def _should_process_line(line_no: int, *, worker_index: int, worker_stride: int) -> bool:
     if worker_stride <= 1:
         return True
@@ -237,6 +250,7 @@ def main() -> int:
     sys_prompt = _system_prompt(args)
     state = _load_state(state_path)
     start_line = int(state.get("last_line", 0)) + 1
+    answered_ids = _load_existing_answer_ids(output_path)
 
     generated = 0
     pending: list[dict[str, object]] = []
@@ -280,6 +294,7 @@ def main() -> int:
                     }
                 )
                 append_jsonl(output_path, rec)
+                answered_ids.add(rid)
                 state["succeeded"] = int(state.get("succeeded", 0)) + 1
                 generated += 1
         except (OpenAIError, ValueError, json.JSONDecodeError) as e:
@@ -307,9 +322,14 @@ def main() -> int:
 
         prompt = extract_prompt(obj)
         rid = record_id(obj, prompt, line_no)
+        state["last_line"] = line_no
+
+        if rid in answered_ids:
+            state["skipped_existing"] = int(state.get("skipped_existing", 0)) + 1
+            _save_state(state_path, state)
+            continue
 
         state["processed"] = int(state.get("processed", 0)) + 1
-        state["last_line"] = line_no
 
         if not prompt:
             state["failed"] = int(state.get("failed", 0)) + 1
@@ -334,7 +354,8 @@ def main() -> int:
             _save_state(state_path, state)
             if int(state.get("processed", 0)) % max(1, args.print_every) == 0:
                 print(
-                    f"processed={state['processed']} succeeded={state['succeeded']} failed={state['failed']} last_line={state['last_line']}"
+                    f"processed={state['processed']} succeeded={state['succeeded']} failed={state['failed']} "
+                    f"skipped_existing={state.get('skipped_existing', 0)} last_line={state['last_line']}"
                 )
 
     if pending and not (args.max_items > 0 and generated >= args.max_items):
