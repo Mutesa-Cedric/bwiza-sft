@@ -22,7 +22,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--shared_output_jsonl", default="outputs/sft/answers.openai.raw.jsonl")
     p.add_argument("--shared_errors_jsonl", default="outputs/sft/answers.openai.errors.jsonl")
     p.add_argument("--temperature", type=float, default=0.2)
-    p.add_argument("--max_output_tokens", type=int, default=900)
+    p.add_argument("--max_output_tokens", type=int, default=3200)
+    p.add_argument("--batch_size", type=int, default=5)
     p.add_argument("--max_retries", type=int, default=4)
     p.add_argument("--retry_backoff_sec", type=float, default=1.0)
     p.add_argument("--request_timeout_sec", type=float, default=120.0)
@@ -87,6 +88,8 @@ def main() -> int:
             args.model,
             "--temperature",
             str(args.temperature),
+            "--batch_size",
+            str(args.batch_size),
             "--max_output_tokens",
             str(args.max_output_tokens),
             "--max_retries",

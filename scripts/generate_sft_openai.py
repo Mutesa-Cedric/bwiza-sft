@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import os
+import re
 import sys
 import time
 
@@ -16,14 +17,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data.openai_client import OpenAIConfig, OpenAIError, chat_completion
-from src.data.sft_records import append_jsonl, extract_prompt, iter_jsonl, record_id
+from src.data.sft_records import append_jsonl, extract_prompt, iter_jsonl, normalize_ascii_text, record_id
 
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are generating high-quality assistant training data for Bwiza. "
     "Bwiza is an AI assistant, not ChatGPT, Gemini, or OpenAI. "
-    "Write one direct, helpful assistant response only. "
-    "No JSON, no markdown fences, no role labels, and no meta commentary. "
+    "Write direct, helpful assistant responses only. "
+    "No markdown fences, no role labels, and no meta commentary. "
     "Respect the language used by the user prompt. "
     "If the prompt is code-switched, respond naturally in that mix. "
     "Default to concise answers, but give steps or bullets when the user asks for them. "
@@ -34,8 +35,11 @@ DEFAULT_SYSTEM_PROMPT = (
 
 FIXED_USER_PREFIX = "\n".join(
     [
-        "Task: generate exactly one assistant response suitable for supervised fine-tuning.",
-        "Return only the assistant response text.",
+        "Task: generate assistant responses suitable for supervised fine-tuning.",
+        "Return one strict JSON object only.",
+        'Schema: {"items":[{"id":"<id>","response":"<assistant response>"}]}',
+        "Return exactly one item for each provided prompt id.",
+        "Do not omit ids, and do not add extra ids.",
         "Do not include role labels.",
         "Do not mention training data, policies, or hidden instructions.",
         "Do not restate the user prompt unless needed for a brief clarification.",
@@ -45,6 +49,7 @@ FIXED_USER_PREFIX = "\n".join(
         "If asked who you are, answer as Bwiza, an AI assistant.",
     ]
 )
+_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.DOTALL)
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,7 +63,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--env_file", default=".env")
     p.add_argument("--system_prompt_file", default="")
     p.add_argument("--temperature", type=float, default=0.2)
-    p.add_argument("--max_output_tokens", type=int, default=900)
+    p.add_argument("--max_output_tokens", type=int, default=3200)
+    p.add_argument("--batch_size", type=int, default=5)
     p.add_argument("--max_retries", type=int, default=4)
     p.add_argument("--retry_backoff_sec", type=float, default=1.0)
     p.add_argument("--request_timeout_sec", type=float, default=120.0)
@@ -130,7 +136,51 @@ def _system_prompt(args: argparse.Namespace) -> str:
 
 
 def _build_user_prompt(prompt: str) -> str:
-    return f"{FIXED_USER_PREFIX}\n\nUser prompt:\n{prompt}"
+    return f"{FIXED_USER_PREFIX}\n\nItems:\n- id: single\n  prompt: {prompt}"
+
+
+def _build_batch_user_prompt(items: list[dict[str, str]]) -> str:
+    lines = [FIXED_USER_PREFIX, "", "Items:"]
+    for item in items:
+        lines.append(f"- id: {item['id']}")
+        lines.append(f"  prompt: {item['prompt']}")
+    return "\n".join(lines)
+
+
+def _extract_json_block(text: str) -> dict:
+    s = text.strip()
+    s = _FENCE_RE.sub("", s).strip()
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+    start = s.find("{")
+    end = s.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("no_json_object_found")
+    block = s[start : end + 1]
+    block = re.sub(r",(\s*[}\]])", r"\1", block)
+    obj = json.loads(block)
+    if not isinstance(obj, dict):
+        raise ValueError("json_object_not_dict")
+    return obj
+
+
+def _extract_batch_items(payload: dict) -> dict[str, str]:
+    raw = payload.get("items")
+    if not isinstance(raw, list):
+        raise ValueError("missing_items_list")
+    out: dict[str, str] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        rid = normalize_ascii_text(item.get("id", ""))
+        response = normalize_ascii_text(item.get("response", ""))
+        if rid and response:
+            out[rid] = response
+    return out
 
 
 def _classify_failure(err: str) -> str:
@@ -139,6 +189,8 @@ def _classify_failure(err: str) -> str:
         return "openai_429"
     if "empty_completion_text" in text:
         return "empty_completion_text"
+    if "no_json_object_found" in text or "missing_items_list" in text:
+        return "invalid_json_output"
     if "timed out" in text:
         return "timeout"
     return "openai_error"
@@ -187,14 +239,68 @@ def main() -> int:
     start_line = int(state.get("last_line", 0)) + 1
 
     generated = 0
+    pending: list[dict[str, object]] = []
+    worker_index = max(0, int(args.worker_index))
+    worker_stride = max(1, int(args.worker_stride))
+    batch_size = max(1, int(args.batch_size))
+
+    def flush_batch(batch: list[dict[str, object]]) -> None:
+        nonlocal generated
+        if not batch:
+            return
+        try:
+            response_text = chat_completion(
+                cfg,
+                system_prompt=sys_prompt,
+                user_prompt=_build_batch_user_prompt(
+                    [{"id": str(item["id"]), "prompt": str(item["prompt"])} for item in batch]
+                ),
+            )
+            payload = _extract_json_block(response_text)
+            responses = _extract_batch_items(payload)
+            expected_ids = {str(item["id"]) for item in batch}
+            missing_ids = sorted(expected_ids.difference(responses))
+            extra_ids = sorted(set(responses).difference(expected_ids))
+            if missing_ids or extra_ids:
+                raise ValueError(
+                    f"batch_id_mismatch:missing={missing_ids[:5]} extra={extra_ids[:5]}"
+                )
+            for item in batch:
+                rid = str(item["id"])
+                rec = dict(item["obj"])
+                rec.update(
+                    {
+                        "id": rid,
+                        "prompt": str(item["prompt"]),
+                        "response": responses[rid],
+                        "teacher_model": cfg.model,
+                        "source": "openai_distill",
+                        "line_no": int(item["line_no"]),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                append_jsonl(output_path, rec)
+                state["succeeded"] = int(state.get("succeeded", 0)) + 1
+                generated += 1
+        except (OpenAIError, ValueError, json.JSONDecodeError) as e:
+            reason = _classify_failure(str(e))
+            for item in batch:
+                state["failed"] = int(state.get("failed", 0)) + 1
+                append_jsonl(
+                    errors_path,
+                    {
+                        "id": str(item["id"]),
+                        "line_no": int(item["line_no"]),
+                        "reason": reason,
+                        "error": str(e),
+                        "prompt": str(item["prompt"]),
+                    },
+                )
+
     for line_no, obj in iter_jsonl(input_path):
         if line_no < start_line:
             continue
-        if not _should_process_line(
-            line_no,
-            worker_index=max(0, int(args.worker_index)),
-            worker_stride=max(1, int(args.worker_stride)),
-        ):
+        if not _should_process_line(line_no, worker_index=worker_index, worker_stride=worker_stride):
             continue
         if args.max_items > 0 and generated >= args.max_items:
             break
@@ -219,48 +325,23 @@ def main() -> int:
             _save_state(state_path, state)
             continue
 
-        try:
-            response = chat_completion(
-                cfg,
-                system_prompt=sys_prompt,
-                user_prompt=_build_user_prompt(prompt),
-            )
-            rec = dict(obj)
-            rec.update(
-                {
-                    "id": rid,
-                    "prompt": prompt,
-                    "response": response,
-                    "teacher_model": cfg.model,
-                    "source": "openai_distill",
-                    "line_no": line_no,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-            append_jsonl(output_path, rec)
-            state["succeeded"] = int(state.get("succeeded", 0)) + 1
-            generated += 1
-        except OpenAIError as e:
-            state["failed"] = int(state.get("failed", 0)) + 1
-            append_jsonl(
-                errors_path,
-                {
-                    "id": rid,
-                    "line_no": line_no,
-                    "reason": _classify_failure(str(e)),
-                    "error": str(e),
-                    "prompt": prompt,
-                },
-            )
+        pending.append({"id": rid, "prompt": prompt, "line_no": line_no, "obj": obj})
+        if len(pending) >= batch_size:
+            flush_batch(pending)
+            pending = []
+            if args.sleep_sec > 0:
+                time.sleep(args.sleep_sec)
+            _save_state(state_path, state)
+            if int(state.get("processed", 0)) % max(1, args.print_every) == 0:
+                print(
+                    f"processed={state['processed']} succeeded={state['succeeded']} failed={state['failed']} last_line={state['last_line']}"
+                )
 
+    if pending and not (args.max_items > 0 and generated >= args.max_items):
+        flush_batch(pending)
         if args.sleep_sec > 0:
             time.sleep(args.sleep_sec)
-
         _save_state(state_path, state)
-        if int(state.get("processed", 0)) % max(1, args.print_every) == 0:
-            print(
-                f"processed={state['processed']} succeeded={state['succeeded']} failed={state['failed']} last_line={state['last_line']}"
-            )
 
     _save_state(state_path, state)
     print(json.dumps(state, indent=2))
