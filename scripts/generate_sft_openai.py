@@ -152,7 +152,7 @@ def _extract_json_block(text: str) -> dict:
     s = text.strip()
     s = _FENCE_RE.sub("", s).strip()
     try:
-        obj = json.loads(s)
+        obj = json.loads(s, strict=False)
         if isinstance(obj, dict):
             return obj
     except json.JSONDecodeError:
@@ -163,7 +163,12 @@ def _extract_json_block(text: str) -> dict:
         raise ValueError("no_json_object_found")
     block = s[start : end + 1]
     block = re.sub(r",(\s*[}\]])", r"\1", block)
-    obj = json.loads(block)
+    try:
+        obj = json.loads(block, strict=False)
+    except json.JSONDecodeError:
+        # Repair stray backslashes that commonly break batched JSON output.
+        block = re.sub(r"\\(?![\"\\/bfnrtu])", r"\\\\", block)
+        obj = json.loads(block, strict=False)
     if not isinstance(obj, dict):
         raise ValueError("json_object_not_dict")
     return obj
@@ -195,6 +200,20 @@ def _classify_failure(err: str) -> str:
     if "timed out" in text:
         return "timeout"
     return "openai_error"
+
+
+def _partition_batch_responses(batch: list[dict[str, object]], responses: dict[str, str]) -> tuple[list[dict[str, object]], list[dict[str, object]], list[str]]:
+    expected_ids = {str(item['id']) for item in batch}
+    extra_ids = sorted(set(responses).difference(expected_ids))
+    succeeded: list[dict[str, object]] = []
+    failed: list[dict[str, object]] = []
+    for item in batch:
+        rid = str(item['id'])
+        if rid in responses and responses[rid]:
+            succeeded.append(item)
+        else:
+            failed.append(item)
+    return succeeded, failed, extra_ids
 
 
 def _load_existing_answer_ids(path: Path) -> set[str]:
@@ -258,6 +277,20 @@ def main() -> int:
     worker_stride = max(1, int(args.worker_stride))
     batch_size = max(1, int(args.batch_size))
 
+    def _log_failed_items(items: list[dict[str, object]], *, reason: str, error_text: str) -> None:
+        for item in items:
+            state["failed"] = int(state.get("failed", 0)) + 1
+            append_jsonl(
+                errors_path,
+                {
+                    "id": str(item["id"]),
+                    "line_no": int(item["line_no"]),
+                    "reason": reason,
+                    "error": error_text,
+                    "prompt": str(item["prompt"]),
+                },
+            )
+
     def flush_batch(batch: list[dict[str, object]]) -> None:
         nonlocal generated
         if not batch:
@@ -272,14 +305,9 @@ def main() -> int:
             )
             payload = _extract_json_block(response_text)
             responses = _extract_batch_items(payload)
-            expected_ids = {str(item["id"]) for item in batch}
-            missing_ids = sorted(expected_ids.difference(responses))
-            extra_ids = sorted(set(responses).difference(expected_ids))
-            if missing_ids or extra_ids:
-                raise ValueError(
-                    f"batch_id_mismatch:missing={missing_ids[:5]} extra={extra_ids[:5]}"
-                )
-            for item in batch:
+            succeeded_items, failed_items, extra_ids = _partition_batch_responses(batch, responses)
+
+            for item in succeeded_items:
                 rid = str(item["id"])
                 rec = dict(item["obj"])
                 rec.update(
@@ -297,20 +325,21 @@ def main() -> int:
                 answered_ids.add(rid)
                 state["succeeded"] = int(state.get("succeeded", 0)) + 1
                 generated += 1
+
+            if failed_items or extra_ids:
+                err = f"batch_id_mismatch:missing={[str(item['id']) for item in failed_items][:5]} extra={extra_ids[:5]}"
+                if len(failed_items) == 1:
+                    _log_failed_items(failed_items, reason="openai_error", error_text=err)
+                else:
+                    flush_batch(failed_items)
         except (OpenAIError, ValueError, json.JSONDecodeError) as e:
             reason = _classify_failure(str(e))
-            for item in batch:
-                state["failed"] = int(state.get("failed", 0)) + 1
-                append_jsonl(
-                    errors_path,
-                    {
-                        "id": str(item["id"]),
-                        "line_no": int(item["line_no"]),
-                        "reason": reason,
-                        "error": str(e),
-                        "prompt": str(item["prompt"]),
-                    },
-                )
+            if len(batch) > 1 and reason in {"openai_error", "timeout", "invalid_json_output"}:
+                mid = max(1, len(batch) // 2)
+                flush_batch(batch[:mid])
+                flush_batch(batch[mid:])
+                return
+            _log_failed_items(batch, reason=reason, error_text=str(e))
 
     for line_no, obj in iter_jsonl(input_path):
         if line_no < start_line:

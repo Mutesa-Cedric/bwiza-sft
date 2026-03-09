@@ -79,3 +79,36 @@ def test_classify_failure_maps_known_cases() -> None:
     assert mod._classify_failure("no_json_object_found") == "invalid_json_output"
     assert mod._classify_failure("The read operation timed out") == "timeout"
     assert mod._classify_failure("other failure") == "openai_error"
+
+
+def test_partition_batch_responses_salvages_partial_batch() -> None:
+    mod = _load_module()
+    batch = [
+        {"id": "a1", "prompt": "p1"},
+        {"id": "a2", "prompt": "p2"},
+        {"id": "a3", "prompt": "p3"},
+    ]
+    responses = {"a1": "r1", "a3": "r3", "extra": "rx"}
+    succeeded, failed, extra = mod._partition_batch_responses(batch, responses)
+    assert [item["id"] for item in succeeded] == ["a1", "a3"]
+    assert [item["id"] for item in failed] == ["a2"]
+    assert extra == ["extra"]
+
+
+def test_extract_json_block_repairs_stray_backslash() -> None:
+    mod = _load_module()
+    payload = '{"items":[{"id":"a1","response":"Koresha C:\Program Files\ app"}]}'
+    out = mod._extract_json_block(payload)
+    assert out["items"][0]["id"] == "a1"
+
+
+def test_partition_batch_responses_marks_all_missing_as_failed() -> None:
+    mod = _load_module()
+    batch = [
+        {"id": "a1", "prompt": "p1"},
+        {"id": "a2", "prompt": "p2"},
+    ]
+    succeeded, failed, extra = mod._partition_batch_responses(batch, {})
+    assert succeeded == []
+    assert [item["id"] for item in failed] == ["a1", "a2"]
+    assert extra == []
